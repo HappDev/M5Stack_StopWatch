@@ -28,7 +28,10 @@ lv_obj_t* Ui::button(const char* text, int x, int y, int w, int h, std::function
 void Ui::begin() {
     lv_obj_add_event_cb(lv_screen_active(),[](lv_event_t* e) { static_cast<Ui*>(lv_event_get_user_data(e))->touch(); },
                         LV_EVENT_PRESSED,this);
-    view_ = View::Pin; last_activity_ = millis(); render();
+    view_ = auth_view(); last_activity_ = millis(); render();
+}
+Ui::View Ui::auth_view() const {
+    return vault_.credential_kind()==CredentialKind::LegacyPin && vault_.status()==VaultStatus::Locked ? View::Pin : View::Pattern;
 }
 void Ui::touch() { last_activity_ = millis(); if (dark_) { dark_ = false; board::screen(true); render(); } }
 void Ui::message(const char* text) { text_ = text; view_ = View::Error; render(); }
@@ -42,7 +45,8 @@ void Ui::lock(bool dark) {
     if(!text_.empty()) wipe(text_.data(),text_.size());
     text_.clear();
     vault_.lock(); wipe(pin_,sizeof pin_); wipe(first_,sizeof first_);
-    pin_len_ = 0; pin_change_ = pin_second_ = false; view_ = View::Pin; render();
+    gesture_.clear(); wipe(pattern_path_,sizeof pattern_path_); pattern_submit_=false;
+    pin_len_ = 0; pattern_change_ = pattern_second_ = false; view_ = auth_view(); render();
     if (dark) { lv_refr_now(nullptr); dark_ = true; board::screen(false); }
 }
 bool Ui::ask(const std::string& text, std::function<void(bool)> action) {
@@ -50,42 +54,111 @@ bool Ui::ask(const std::string& text, std::function<void(bool)> action) {
     text_ = text; pending_ = std::move(action); answer_ = -1; view_ = View::Confirm; render(); return true;
 }
 void Ui::refresh() {
-    if (vault_.status() != VaultStatus::Unlocked) { lock(); return; }
+    if (!vault_.ready()) { lock(); return; }
     if (view_ == View::List || view_ == View::Code || view_ == View::Settings) render();
 }
 void Ui::pin_key(int key) {
+    if (busy_ || vault_.wait_seconds()) return;
     if (key == 10) { if (pin_len_) pin_[--pin_len_] = 0; }
     else if (key >= 0 && key <= 9 && pin_len_ < 12) { pin_[pin_len_++] = '0' + key; pin_[pin_len_] = 0; }
     if (pin_label_) { char mask[13]{}; memset(mask,'*',pin_len_); lv_label_set_text(pin_label_,mask); }
 }
 void Ui::submit_pin() {
+    if (busy_ || vault_.wait_seconds() || vault_.credential_kind()!=CredentialKind::LegacyPin || vault_.status()!=VaultStatus::Locked) return;
     if (!Vault::valid_pin(pin_)) { if (info_label_) lv_label_set_text(info_label_,"Введите 8–12 цифр"); return; }
-    bool create = vault_.status() == VaultStatus::Empty;
-    if ((create || pin_change_) && !pin_second_) {
-        memcpy(first_,pin_,sizeof first_); wipe(pin_,sizeof pin_); pin_len_ = 0; pin_second_ = true; render(); return;
-    }
-    if ((create || pin_change_) && strcmp(first_,pin_)) {
-        wipe(first_,sizeof first_); wipe(pin_,sizeof pin_); pin_len_ = 0; pin_second_ = false;
-        render(); lv_label_set_text(info_label_,"PIN не совпали"); return;
-    }
+    busy_=true;
     if (info_label_) lv_label_set_text(info_label_,"Проверка…");
     lv_refr_now(nullptr);
-    bool ok = create ? vault_.create(pin_) : pin_change_ ? vault_.change_pin(pin_) : vault_.unlock(pin_);
-    wipe(pin_,sizeof pin_); wipe(first_,sizeof first_); pin_len_ = 0; pin_second_ = pin_change_ = false;
+    bool ok = vault_.unlock_legacy_pin(pin_);
+    wipe(pin_,sizeof pin_); pin_len_ = 0; busy_=false;
     touch();
-    if (ok) { view_ = View::List; render(); }
+    if (ok) { usb_=false; view_ = View::Pattern; render(); }
     else { view_ = View::Pin; render(); if (info_label_) lv_label_set_text(info_label_,vault_.error()); }
+}
+void Ui::cancel_pattern() {
+    wipe(first_,sizeof first_); gesture_.clear(); wipe(pattern_path_,sizeof pattern_path_);
+    pattern_second_=pattern_change_=pattern_submit_=false;
+    if (!vault_.ready()) lock();
+    else { view_=View::List; render(); }
+}
+void Ui::draw_pattern() {
+    if (!pattern_panel_) return;
+    for (int p=1;p<=9;++p) lv_obj_set_style_bg_color(pattern_dots_[p-1],
+        lv_color_hex(gesture_.contains(p) ? (gesture_.overflow()?0xff8070:0x63e6c2) : 0x62847f),0);
+    wipe(pattern_path_,sizeof pattern_path_);
+    for (size_t i=0;i<gesture_.size();++i) {
+        int p=gesture_.points()[i]-'0';
+        pattern_path_[i].x=PatternGesture::center_x(p); pattern_path_[i].y=PatternGesture::center_y(p);
+    }
+    if (gesture_.size()<2) lv_obj_add_flag(pattern_line_,LV_OBJ_FLAG_HIDDEN);
+    else {
+        lv_line_set_points(pattern_line_,pattern_path_,gesture_.size());
+        lv_obj_set_style_line_color(pattern_line_,lv_color_hex(gesture_.overflow()?0xff8070:0x63e6c2),0);
+        lv_obj_remove_flag(pattern_line_,LV_OBJ_FLAG_HIDDEN);
+    }
+}
+void Ui::pattern_event(lv_event_t* event) {
+    auto* ui=static_cast<Ui*>(lv_event_get_user_data(event));
+    if (ui->view_!=View::Pattern || ui->busy_ || ui->dark_ || ui->pattern_submit_ || ui->vault_.wait_seconds()) return;
+    auto code=lv_event_get_code(event);
+    if (code==LV_EVENT_PRESS_LOST) { ui->gesture_.clear(); ui->draw_pattern(); return; }
+    if (code!=LV_EVENT_PRESSED && code!=LV_EVENT_PRESSING && code!=LV_EVENT_RELEASED) return;
+    auto* indev=lv_event_get_indev(event); if (!indev) return;
+    lv_point_t point; lv_indev_get_point(indev,&point);
+    lv_area_t area; lv_obj_get_coords(ui->pattern_panel_,&area);
+    int x=point.x-area.x1,y=point.y-area.y1;
+    ui->touch();
+    if (code==LV_EVENT_PRESSED) ui->gesture_.start(x,y);
+    else if (ui->gesture_.active()) ui->gesture_.move(x,y);
+    ui->draw_pattern();
+    // Defer KDF and screen deletion until LVGL has finished dispatching events.
+    if (code==LV_EVENT_RELEASED && ui->gesture_.active()) ui->pattern_submit_=true;
+}
+void Ui::submit_pattern() {
+    pattern_submit_=false;
+    if (busy_ || view_!=View::Pattern || vault_.wait_seconds()) { gesture_.clear(); return; }
+    if (!gesture_.valid()) {
+        gesture_.clear(); draw_pattern();
+        if (info_label_) lv_label_set_text(info_label_,"Соедините 4–6 точек");
+        return;
+    }
+    char pattern[7]{}; memcpy(pattern,gesture_.points(),sizeof pattern); gesture_.clear();
+    bool create=vault_.status()==VaultStatus::Empty;
+    bool enroll=create || pattern_change_ || vault_.credential_kind()==CredentialKind::LegacyPin;
+    if (enroll && !pattern_second_) {
+        memcpy(first_,pattern,sizeof first_); wipe(pattern,sizeof pattern); pattern_second_=true; render(); return;
+    }
+    if (enroll && strcmp(first_,pattern)) {
+        wipe(first_,sizeof first_); wipe(pattern,sizeof pattern); pattern_second_=false;
+        render(); if (info_label_) lv_label_set_text(info_label_,"Рисунки не совпали"); return;
+    }
+    busy_=true; draw_pattern();
+    if (info_label_) lv_label_set_text(info_label_,"Проверка…");
+    lv_refr_now(nullptr);
+    bool ok=create ? vault_.create_pattern(pattern) : enroll ? vault_.change_pattern(pattern) : vault_.unlock_pattern(pattern);
+    wipe(pattern,sizeof pattern); wipe(first_,sizeof first_); pattern_second_=pattern_change_=false; busy_=false;
+    touch();
+    if (ok && vault_.ready()) { view_=View::List; render(); }
+    else { lock(); if (info_label_) lv_label_set_text(info_label_,vault_.error()); }
 }
 void Ui::select(size_t index) { selected_ = index; view_ = View::Code; render(); }
 void Ui::settings_action(int action) {
-    if (action == 0) { usb_ = !usb_; render(); }
-    if (action == 1) { usb_ = false; pin_change_ = true; pin_second_ = false; pin_len_ = 0; view_ = View::Pin; render(); }
+    if (action == 0 && vault_.ready()) { usb_ = !usb_; render(); }
+    if (action == 1 && vault_.ready()) {
+        usb_=false; if (on_lock_) on_lock_();
+        wipe(first_,sizeof first_); gesture_.clear(); pattern_submit_=false;
+        pattern_change_=true; pattern_second_=false; view_=View::Pattern; render();
+    }
     if (action == 2) ask("Удалить ВСЕ аккаунты?\nНужна резервная копия.\nОтменить сброс нельзя.", [this](bool yes) {
-        if (yes) { vault_.reset(); lock(); } else { view_ = View::Settings; render(); }
+        if (yes) { vault_.reset(); lock(); }
+        else if (vault_.ready()) { view_ = View::Settings; render(); }
+        else lock();
     });
 }
 void Ui::render() {
+    if ((view_==View::List || view_==View::Code || view_==View::Settings) && !vault_.ready()) view_=auth_view();
     retry_visible_=false;
+    pattern_panel_=pattern_line_=nullptr; std::fill(std::begin(pattern_dots_),std::end(pattern_dots_),nullptr);
     pin_label_ = code_label_ = seconds_label_ = info_label_ = nullptr;
     auto screen = lv_screen_active(); lv_obj_clean(screen);
     lv_obj_set_style_bg_color(screen,lv_color_hex(0x081615),0); lv_obj_remove_flag(screen,LV_OBJ_FLAG_SCROLLABLE);
@@ -98,16 +171,32 @@ void Ui::render() {
         }
     }
     if (view_ == View::Pin) {
-        const char* title = pin_second_ ? "Повторите PIN" : pin_change_ ? "Новый PIN" :
-            vault_.status() == VaultStatus::Empty ? "Создайте PIN" : "Введите PIN";
-        label(title,100,58,266); pin_label_ = label("",100,88,266,&lv_font_montserrat_28);
+        label("Прежний PIN",100,58,266); pin_label_ = label("",100,88,266,&lv_font_montserrat_28);
         char mask[13]{}; memset(mask,'*',pin_len_); lv_label_set_text(pin_label_,mask);
         for (int i = 0; i < 9; ++i) button(std::to_string(i+1).c_str(),113+(i%3)*83,130+(i/3)*48,74,42,[this,i]{pin_key(i+1);});
         button("<",113,274,74,42,[this]{pin_key(10);}); button("0",196,274,74,42,[this]{pin_key(0);});
         button("OK",279,274,74,42,[this]{submit_pin();});
         info_label_ = label("8–12 цифр",85,329,296);
-        if (!pin_change_) button("Сброс",168,377,130,38,[this]{settings_action(2);});
-        else button("Отмена",168,377,130,38,[this]{wipe(pin_,sizeof pin_);wipe(first_,sizeof first_);pin_len_=0;pin_change_=pin_second_=false;view_=View::List;render();});
+        button("Сброс",168,377,130,38,[this]{settings_action(2);});
+    } else if (view_ == View::Pattern) {
+        bool enroll=pattern_change_ || vault_.status()==VaultStatus::Empty || vault_.credential_kind()==CredentialKind::LegacyPin;
+        label(pattern_second_ ? "Повторите рисунок" : enroll ? "Создайте ключ" : "Нарисуйте ключ",75,62,316);
+        pattern_panel_=lv_obj_create(screen); lv_obj_set_pos(pattern_panel_,103,104); lv_obj_set_size(pattern_panel_,260,250);
+        lv_obj_set_style_pad_all(pattern_panel_,0,0); lv_obj_set_style_border_width(pattern_panel_,0,0);
+        lv_obj_set_style_bg_opa(pattern_panel_,LV_OPA_TRANSP,0);
+        lv_obj_remove_flag(pattern_panel_,LV_OBJ_FLAG_SCROLLABLE); lv_obj_add_flag(pattern_panel_,LV_OBJ_FLAG_PRESS_LOCK);
+        lv_obj_add_event_cb(pattern_panel_,pattern_event,LV_EVENT_ALL,this);
+        pattern_line_=lv_line_create(pattern_panel_); lv_obj_remove_flag(pattern_line_,LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_line_width(pattern_line_,5,0); lv_obj_set_style_line_rounded(pattern_line_,true,0);
+        for (int p=1;p<=9;++p) {
+            auto* dot=lv_obj_create(pattern_panel_); pattern_dots_[p-1]=dot;
+            lv_obj_set_size(dot,20,20); lv_obj_set_pos(dot,PatternGesture::center_x(p)-10,PatternGesture::center_y(p)-10);
+            lv_obj_set_style_radius(dot,LV_RADIUS_CIRCLE,0); lv_obj_set_style_border_width(dot,0,0);
+            lv_obj_remove_flag(dot,LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(dot,LV_OBJ_FLAG_SCROLLABLE);
+        }
+        info_label_=label("Соедините 4–6 точек",70,357,326); draw_pattern();
+        if (enroll && vault_.status()!=VaultStatus::Empty) button("Отмена",168,395,130,38,[this]{cancel_pattern();});
+        else button("Сброс",168,395,130,38,[this]{gesture_.clear();wipe(first_,sizeof first_);pattern_second_=false;settings_action(2);});
     } else if (view_ == View::List) {
         label("Аккаунты",100,65,266);
         auto panel = lv_obj_create(screen); lv_obj_set_pos(panel,67,105); lv_obj_set_size(panel,332,248);
@@ -135,7 +224,7 @@ void Ui::render() {
     } else if (view_ == View::Settings) {
         label("Настройки",90,65,286);
         button(usb_ ? "Закрыть USB" : "Разрешить USB",98,115,270,48,[this]{settings_action(0);});
-        button("Сменить PIN",98,178,270,48,[this]{settings_action(1);});
+        button("Сменить ключ",98,178,270,48,[this]{settings_action(1);});
         button("Сбросить всё",98,241,270,48,[this]{settings_action(2);});
         label(board::rtc_valid() ? "Время UTC установлено" : "Синхронизируйте время",75,308,316);
         button("Назад",153,365,160,45,[this]{view_=View::List;render();});
@@ -147,7 +236,7 @@ void Ui::render() {
         auto l=label(text_.c_str(),0,0,310);lv_obj_set_parent(l,panel);lv_obj_set_height(l,LV_SIZE_CONTENT);
         button("Отмена",87,335,140,55,[this]{answer_=0;}); button("Разрешить",239,335,140,55,[this]{answer_=1;});
     } else {
-        label(text_.c_str(),70,140,326); button("Назад",153,330,160,50,[this]{view_=vault_.status()==VaultStatus::Unlocked?View::List:View::Pin;render();});
+        label(text_.c_str(),70,140,326); button("Назад",153,330,160,50,[this]{view_=vault_.ready()?View::List:auth_view();render();});
     }
 }
 void Ui::tick() {
@@ -157,9 +246,12 @@ void Ui::tick() {
         bool was_dark = dark_; touch();
         if (!was_dark) {
             if (held) lock();
-            else if (vault_.status() == VaultStatus::Unlocked && !pending_) {
-                if (a && vault_.count()) select((selected_ + 1) % vault_.count());
-                if (b) { wipe(pin_,sizeof pin_);wipe(first_,sizeof first_);pin_len_=0;pin_change_=pin_second_=false;view_ = View::List; render(); }
+            else if (vault_.ready() && !pending_) {
+                if (view_==View::Pattern) { if (b) cancel_pattern(); }
+                else {
+                    if (a && vault_.count()) select((selected_ + 1) % vault_.count());
+                    if (b) { view_ = View::List; render(); }
+                }
             }
         }
     }
@@ -169,20 +261,21 @@ void Ui::tick() {
     if (lv_display_get_inactive_time(nullptr) < 100) last_activity_ = millis();
     if (answer_ >= 0 && pending_) {
         bool yes = answer_ == 1; auto action = std::move(pending_); pending_ = {}; answer_ = -1;
-        view_ = vault_.status() == VaultStatus::Unlocked ? View::List : View::Pin;
+        view_ = vault_.ready() ? View::List : auth_view();
         action(yes); render();
     }
     if (millis() - last_activity_ >= 30000 && !dark_) lock(true);
+    if (pattern_submit_) submit_pattern();
     uint32_t second = millis()/1000;
     if (second != last_second_ && !dark_) {
         last_second_ = second;
-        if (view_ == View::Pin && info_label_) {
+        if ((view_ == View::Pin || view_==View::Pattern) && info_label_) {
             const auto wait=vault_.wait_seconds();
             if(wait) {
                 char text[64]; snprintf(text,sizeof text,"Повторите через %lu с",static_cast<unsigned long>(wait)); lv_label_set_text(info_label_,text);
                 retry_visible_=true;
             } else if(retry_visible_) {
-                lv_label_set_text(info_label_,"Введите 8–12 цифр");retry_visible_=false;
+                lv_label_set_text(info_label_,view_==View::Pin?"Введите 8–12 цифр":"Соедините 4–6 точек");retry_visible_=false;
             }
         }
         if (view_ == View::Code && code_label_) {

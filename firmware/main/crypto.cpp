@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <mbedtls/gcm.h>
 #include <mbedtls/md.h>
-#include <mbedtls/pkcs5.h>
+#include <mbedtls/sha256.h>
 #include <mbedtls/platform_util.h>
 #include <bootloader_random.h>
 #include <esp_random.h>
@@ -93,9 +93,44 @@ bool totp(const Record& r, uint64_t timestamp, char out[9]) {
     for(int i=static_cast<int>(width)-1;i>=0;--i) {out[i]='0'+binary%10;binary/=10;}
     wipe(hash, sizeof hash); wipe(message, sizeof message); return true;
 }
-bool derive_key(const char* pin, const uint8_t salt[16], uint8_t key[32]) {
-    int ret = mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA256, reinterpret_cast<const uint8_t*>(pin),
-                                          strlen(pin), salt, 16, KdfIterations, 32, key);
+bool derive_key(const char* credential, const uint8_t salt[16], uint8_t key[32]) {
+    // PBKDF2-HMAC-SHA256, one 32-byte output block. Cache the SHA states after
+    // the HMAC ipad/opad blocks instead of hashing those same blocks 600000
+    // times. The iteration count and derived key are identical to PKCS5.
+    // These credential-dependent states live only for this invocation.
+    static_assert(KdfIterations > 0, "PBKDF2 requires at least one iteration");
+    mbedtls_sha256_context inner, outer, work;
+    mbedtls_sha256_init(&inner); mbedtls_sha256_init(&outer); mbedtls_sha256_init(&work);
+    uint8_t pad[64]{}, u[32]{};
+    const size_t length = strlen(credential);
+    const auto* password = reinterpret_cast<const uint8_t*>(credential);
+    int ret = 0;
+    if (length > sizeof pad) ret = mbedtls_sha256(password, length, pad, 0);
+    else memcpy(pad, password, length);
+    for (auto& byte : pad) byte ^= 0x36;
+    if (!ret) ret = mbedtls_sha256_starts(&inner, 0);
+    if (!ret) ret = mbedtls_sha256_update(&inner, pad, sizeof pad);
+    for (auto& byte : pad) byte ^= 0x36 ^ 0x5c;
+    if (!ret) ret = mbedtls_sha256_starts(&outer, 0);
+    if (!ret) ret = mbedtls_sha256_update(&outer, pad, sizeof pad);
+    wipe(pad, sizeof pad);
+
+    // U1 = HMAC(password, salt || INT32_BE(1)); Ui = HMAC(password, Ui-1).
+    memcpy(u, salt, 16); u[19] = 1;
+    memset(key, 0, 32);
+    for (uint32_t i = 0; !ret && i < KdfIterations; ++i) {
+        mbedtls_sha256_clone(&work, &inner);
+        ret = mbedtls_sha256_update(&work, u, i == 0 ? 20 : sizeof u);
+        if (!ret) ret = mbedtls_sha256_finish(&work, u);
+        if (!ret) {
+            mbedtls_sha256_clone(&work, &outer);
+            ret = mbedtls_sha256_update(&work, u, sizeof u);
+        }
+        if (!ret) ret = mbedtls_sha256_finish(&work, u);
+        if (!ret) for (size_t j = 0; j < sizeof u; ++j) key[j] ^= u[j];
+    }
+    mbedtls_sha256_free(&work); mbedtls_sha256_free(&outer); mbedtls_sha256_free(&inner);
+    wipe(u, sizeof u);
     if (ret) wipe(key, 32);
     return ret == 0;
 }

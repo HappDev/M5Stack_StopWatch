@@ -21,9 +21,9 @@ function render() {
   $('connection-pill').classList.toggle('ready', ready);
   $('connection-heading').textContent = ready ? 'StopWatch готов к настройке' : connected ? 'Разрешите доступ на устройстве' : 'Подключите прошитый StopWatch';
   $('connection-detail').textContent = ready ? `Прошивка ${state.firmware} · ${state.batteryMv} мВ · Подтверждайте действия на экране StopWatch.` :
-    connected ? (state?.state === 'empty' ? 'Создайте PIN на экране StopWatch, затем разрешите USB в настройках.' :
+    connected ? (state?.state === 'empty' ? 'Создайте графический ключ на экране StopWatch, затем разрешите USB в настройках.' :
       ['damaged','storage_error'].includes(state?.state) ? 'Хранилище недоступно. Выполните сброс на устройстве и восстановите копию.' :
-      'Введите PIN на StopWatch. Откройте «Настройки» → «Разрешить USB».') :
+      'Разблокируйте StopWatch и завершите настройку графического ключа. Откройте «Настройки» → «Разрешить USB».') :
     'После установки прошивки подключите устройство для настройки аккаунтов.';
   document.querySelectorAll('[data-auth]').forEach(b => { b.disabled = !ready || busy; });
   const count = ready ? records.length : 0;
@@ -38,7 +38,7 @@ function renderRecords() {
   const container=$('account-list');container.replaceChildren();
   if (!authorized() || !records.length) {
     const empty=node('div','empty');empty.append(node('div','empty-icon','＋'),node('h3','',authorized()?'Добавьте первый аккаунт':'Здесь будут ваши аккаунты'),
-      node('p','',authorized()?'Нажмите «Добавить аккаунт». QR-картинка и секрет обрабатываются локально.':'Подключите устройство и разрешите USB-доступ в его настройках после ввода PIN.'),
+      node('p','',authorized()?'Нажмите «Добавить аккаунт». QR-картинка и секрет обрабатываются локально.':'Подключите устройство и разрешите USB-доступ в его настройках после разблокировки.'),
       node('span','empty-footnote','Секреты аккаунтов скрыты в списке'));container.append(empty);return;
   }
   const q=$('search').value.toLocaleLowerCase('ru');
@@ -104,7 +104,7 @@ $('connect').addEventListener('click',async()=>{
   if(busy)return;busy=true;render();
   try{
     if(device.connected) await device.disconnect();
-    else{state=await device.connect();if(authorized())await loadRecords();notice(authorized()?'Устройство подключено. Можно управлять аккаунтами.':'Теперь введите PIN на StopWatch и разрешите USB в настройках.');}
+    else{state=await device.connect();if(authorized())await loadRecords();notice(authorized()?'Устройство подключено. Можно управлять аккаунтами.':'Теперь разблокируйте StopWatch и разрешите USB в настройках.');}
   }catch(error){notice(error.name==='NotFoundError'?'USB-порт не выбран.':error.message,true);}
   finally{busy=false;render();}
 });

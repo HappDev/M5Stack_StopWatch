@@ -105,8 +105,8 @@ void Protocol::disconnected() {
 void Protocol::status(int id) {
     auto* o=object(); cJSON_AddStringToObject(o,"firmware","0.1.0");
     const char* state = vault_.status()==VaultStatus::Empty?"empty":vault_.status()==VaultStatus::Locked?"locked":
-        vault_.status()==VaultStatus::Unlocked?"unlocked":vault_.status()==VaultStatus::Damaged?"damaged":"storage_error";
-    cJSON_AddStringToObject(o,"state",state); cJSON_AddBoolToObject(o,"authorized",authorized_ && vault_.status()==VaultStatus::Unlocked);
+        vault_.status()==VaultStatus::Unlocked?(vault_.ready()?"unlocked":"locked"):vault_.status()==VaultStatus::Damaged?"damaged":"storage_error";
+    cJSON_AddStringToObject(o,"state",state); cJSON_AddBoolToObject(o,"authorized",authorized_ && vault_.ready());
     cJSON_AddBoolToObject(o,"timeValid",board::rtc_valid()); cJSON_AddNumberToObject(o,"time",board::rtc_valid()?board::now():0);
     cJSON_AddNumberToObject(o,"batteryMv",board::battery_mv()); cJSON_AddNumberToObject(o,"retryAfter",vault_.wait_seconds()); reply(id,o);
 }
@@ -127,7 +127,7 @@ void Protocol::receive(char* line) {
     if (!op || !cJSON_IsObject(args)) { error(id,"FRAME","Неверная команда"); return; }
     if (!strcmp(op,"status")) { status(id); return; }
     if (!strcmp(op,"lock")) { ui_.lock(); clear_transfers(); reply(id,object()); return; }
-    if (vault_.status()!=VaultStatus::Unlocked || !authorized_) { error(id,"LOCKED","Введите PIN и разрешите USB на StopWatch"); return; }
+    if (!vault_.ready() || !authorized_) { error(id,"LOCKED","Разблокируйте StopWatch и разрешите USB"); return; }
     if (pending_) { error(id,"BUSY","Подтвердите действие на StopWatch"); return; }
     transfer_activity_=esp_timer_get_time();
     if (!strcmp(op,"list")) {
@@ -199,7 +199,7 @@ void Protocol::receive(char* line) {
     pending_=true;
     bool asked=ui_.ask(question,[this,root,id,received_at](bool yes) {
         pending_=false;auto* args=cJSON_GetObjectItemCaseSensitive(root.get(),"args");const char* op=str(root.get(),"op");
-        if(!yes || !authorized_ || vault_.status()!=VaultStatus::Unlocked || !tud_cdc_connected()) {
+        if(!yes || !authorized_ || !vault_.ready() || !tud_cdc_connected()) {
             clear_transfers();error(id,"CANCELLED","Действие отменено на устройстве");return;
         }
         transfer_activity_=esp_timer_get_time();
@@ -225,7 +225,8 @@ void Protocol::receive(char* line) {
 void Protocol::tick() {
     bool connected=tud_cdc_connected();
     if(connected!=was_connected_) { disconnected();was_connected_=connected; }
-    if(!authorized_ || vault_.status()!=VaultStatus::Unlocked) clear_transfers();
+    if(!vault_.ready()) authorized_=false;
+    if(!authorized_ || !vault_.ready()) clear_transfers();
     if(!pending_ && (restoring_ || exporting_) && esp_timer_get_time()-transfer_activity_>15000000) clear_transfers();
     if(line_size_ && esp_timer_get_time()-line_started_>3000000) {wipe(line_,sizeof line_);line_size_=0;overflow_=true;}
     if(!connected) return;

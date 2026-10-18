@@ -1,5 +1,6 @@
 #pragma once
 #include "vault.h"
+#include "pattern.h"
 #include <functional>
 #include <utility>
 #include <string>
@@ -17,10 +18,15 @@ public:
     void message(const char* text);
     void set_lock_hook(std::function<void()> hook) { on_lock_=std::move(hook); }
 private:
-    enum class View { Pin, List, Code, Settings, Confirm, Error };
+    enum class View { Pin, Pattern, List, Code, Settings, Confirm, Error };
     void render();
+    View auth_view() const;
     void pin_key(int key);
     void submit_pin();
+    void submit_pattern();
+    void cancel_pattern();
+    void draw_pattern();
+    static void pattern_event(lv_event_t* event);
     void settings_action(int action);
     void select(size_t index);
     void touch();
@@ -30,9 +36,15 @@ private:
     static void deleted(lv_event_t* event);
     Vault& vault_; bool& usb_;
     View view_ = View::Pin;
-    bool dark_ = false, pin_change_ = false, pin_second_ = false;
+    bool dark_ = false, pattern_change_ = false, pattern_second_ = false;
+    bool busy_ = false, pattern_submit_ = false;
     bool retry_visible_ = false;
-    char pin_[13]{}, first_[13]{};
+    char pin_[13]{}, first_[7]{};
+    PatternGesture gesture_;
+    lv_obj_t* pattern_panel_ = nullptr;
+    lv_obj_t* pattern_dots_[9]{};
+    lv_obj_t* pattern_line_ = nullptr;
+    lv_point_precise_t pattern_path_[6]{};
     size_t pin_len_ = 0, selected_ = 0;
     uint32_t last_activity_ = 0, last_second_ = 0;
     lv_obj_t* pin_label_ = nullptr;

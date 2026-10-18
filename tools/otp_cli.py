@@ -13,7 +13,7 @@ import warnings
 
 MAX_FRAME = 4096
 ERRORS = {
-    'LOCKED': 'Введите PIN и включите «Разрешить USB» на StopWatch.',
+    'LOCKED': 'Разблокируйте StopWatch и включите «Разрешить USB» на StopWatch.',
     'CANCELLED': 'Операция отклонена на устройстве.',
     'BUSY': 'На устройстве уже ожидается подтверждение другой операции.',
     'INPUT': 'Устройство отклонило параметры операции.',
@@ -244,14 +244,14 @@ class Device:
             received[:] = b'\0' * len(received)
 
     def wait_authorized(self, wait=120):
-        print('На StopWatch введите PIN, затем «Настройки» → «Разрешить USB». Порт остаётся открытым.', flush=True)
+        print('На StopWatch разблокируйте устройство и завершите настройку ключа, затем «Настройки» → «Разрешить USB». Порт остаётся открытым.', flush=True)
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
             state = self.request('status', timeout=min(3, max(0.1, deadline - time.monotonic())))
             if state.get('state') == 'unlocked' and state.get('authorized') is True:
                 return state
             if state.get('state') in ('damaged', 'storage_error', 'empty'):
-                raise CliError('Сначала создайте PIN или устраните ошибку хранилища на экране StopWatch.')
+                raise CliError('Сначала создайте графический ключ или устраните ошибку хранилища на экране StopWatch.')
             time.sleep(0.5)
         raise CliError('Не получено разрешение USB на StopWatch.')
 
@@ -279,7 +279,7 @@ def hidden_input(prompt):
             raise CliError('Для скрытого ввода откройте обычный Терминал/PowerShell, без перенаправления ввода.') from None
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='StopWatch OTP: аккаунты по USB без браузера. PIN вводится только на устройстве.')
+    parser = argparse.ArgumentParser(description='StopWatch OTP: аккаунты по USB без браузера. Графический ключ вводится только на устройстве.')
     parser.add_argument('--port', help='COM7 (Windows) или /dev/cu.usbmodem... (Mac)')
     sub = parser.add_subparsers(dest='command', required=True)
     for command in ('ports', 'status', 'list', 'time', 'lock'):

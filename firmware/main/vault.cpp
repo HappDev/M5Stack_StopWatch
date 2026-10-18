@@ -1,6 +1,8 @@
 #include "vault.h"
+#include "pattern.h"
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <esp_rom_crc.h>
 #include <esp_timer.h>
 #include <nvs_flash.h>
@@ -8,6 +10,9 @@
 namespace otp {
 constexpr uint32_t Magic = 0x3156544f, Commit = 0x54494d43;
 constexpr char WrapAad[] = "StopWatch/DEK/v1";
+static void pattern_credential(const char* pattern, char (&credential)[28]) {
+    snprintf(credential,sizeof credential,"StopWatch/Pattern/v1:%s",pattern);
+}
 bool Vault::fail(const char* text) { error_ = text; return false; }
 bool Vault::valid_pin(const char* pin) {
     size_t n = strlen(pin); if (n < 8 || n > 12) return false;
@@ -19,7 +24,7 @@ bool Vault::begin() {
         return fail("Ошибка NVS. Требуется восстановление.");
     // Missing counter is valid only on a pristine device; never erase NVS automatically.
     esp_err_t ret = nvs_get_u32(nvs_, "attempts", &attempts_);
-    if (ret != ESP_OK && ret != ESP_ERR_NVS_NOT_FOUND) return fail("Ошибка счётчика PIN");
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_NOT_FOUND) return fail("Ошибка счётчика попыток");
     for (int i = 0; i < 2; ++i) parts_[i] = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
         ESP_PARTITION_SUBTYPE_ANY, i ? "vault_b" : "vault_a");
     if (!parts_[0] || !parts_[1]) return fail("Не найдены разделы хранилища");
@@ -29,7 +34,7 @@ bool Vault::begin() {
         slot_ = vb && (!va || b.generation > a.generation) ? 1 : 0;
         header_ = slot_ ? b : a; status_ = VaultStatus::Locked;
         // Reserve a counter on first initialization, fail closed on missing counters thereafter.
-        if (ret == ESP_ERR_NVS_NOT_FOUND) { status_ = VaultStatus::StorageError; return fail("Повреждён счётчик PIN"); }
+        if (ret == ESP_ERR_NVS_NOT_FOUND) { status_ = VaultStatus::StorageError; return fail("Повреждён счётчик попыток"); }
     } else {
         bool blank = true; uint8_t buf[256];
         for (int s = 0; s < 2 && blank; ++s) for (size_t off = 0; off < parts_[s]->size; off += sizeof buf) {
@@ -45,7 +50,7 @@ bool Vault::begin() {
 bool Vault::inspect(int slot, Header& h, uint8_t* cipher) {
     uint32_t marker = 0;
     if (esp_partition_read(parts_[slot], parts_[slot]->size - 4, &marker, 4) != ESP_OK || marker != Commit ||
-        esp_partition_read(parts_[slot], 0, &h, sizeof h) != ESP_OK || h.magic != Magic || h.version != 1 ||
+        esp_partition_read(parts_[slot], 0, &h, sizeof h) != ESP_OK || h.magic != Magic || (h.version != 1 && h.version != 2) ||
         !h.generation || h.count > MaxRecords || h.length != h.count * sizeof(Record) ||
         h.iterations != KdfIterations || esp_partition_read(parts_[slot], sizeof h, cipher, h.length) != ESP_OK) return false;
     uint32_t crc = esp_rom_crc32_le(0, reinterpret_cast<const uint8_t*>(&h), offsetof(Header, crc));
@@ -56,34 +61,44 @@ uint32_t Vault::wait_seconds() const {
 }
 bool Vault::save_attempts(uint32_t value) {
     if (nvs_set_u32(nvs_, "attempts", value) != ESP_OK || nvs_commit(nvs_) != ESP_OK) {
-        status_ = VaultStatus::StorageError; lock(); return fail("Ошибка записи счётчика PIN");
+        status_ = VaultStatus::StorageError; lock(); return fail("Ошибка записи счётчика попыток");
     }
     attempts_ = value; return true;
 }
-bool Vault::create(const char* pin) {
-    if (status_ != VaultStatus::Empty || !valid_pin(pin)) return fail("Нужен PIN из 8–12 цифр");
-    header_ = {}; header_.magic = Magic; header_.version = 1; header_.iterations = KdfIterations;
+bool Vault::create_pattern(const char* pattern) {
+    if (status_ != VaultStatus::Empty || !valid_pattern(pattern)) return fail("Соедините 4–6 точек");
+    header_ = {}; header_.magic = Magic; header_.version = 2; header_.iterations = KdfIterations;
+    char credential[28]{}; pattern_credential(pattern,credential);
     uint8_t kek[32]{}; random_bytes(key_, 32); random_bytes(header_.salt, 16); random_bytes(header_.wrap_nonce, 12);
-    bool ok = derive_key(pin, header_.salt, kek) && encrypt(kek, header_.wrap_nonce, WrapAad, sizeof WrapAad,
+    bool ok = derive_key(credential, header_.salt, kek) && encrypt(kek, header_.wrap_nonce, WrapAad, sizeof WrapAad,
         key_, 32, header_.wrapped_key, header_.wrap_tag);
-    wipe(kek, sizeof kek);
+    wipe(kek, sizeof kek); wipe(credential,sizeof credential);
     if (!ok || !save_attempts(0)) { lock(); return fail("Не удалось создать ключ"); }
     status_ = VaultStatus::Unlocked; count_ = 0;
     if (!save()) { status_ = VaultStatus::Damaged; lock(); return false; } return true;
 }
-bool Vault::unlock(const char* pin) {
-    if (status_ != VaultStatus::Locked || wait_seconds() || !valid_pin(pin)) return fail("PIN недоступен или неверен");
+bool Vault::unlock_legacy_pin(const char* pin) {
+    if (credential_kind()!=CredentialKind::LegacyPin || !valid_pin(pin)) return fail("PIN недоступен или неверен");
+    return unlock_credential(pin);
+}
+bool Vault::unlock_pattern(const char* pattern) {
+    if (credential_kind()!=CredentialKind::Pattern || !valid_pattern(pattern)) return fail("Соедините 4–6 точек");
+    char credential[28]{}; pattern_credential(pattern,credential);
+    bool ok=unlock_credential(credential); wipe(credential,sizeof credential); return ok;
+}
+bool Vault::unlock_credential(const char* credential) {
+    if (status_ != VaultStatus::Locked || wait_seconds()) return fail("Разблокировка пока недоступна");
     // Persist the attempt BEFORE the slow KDF: cutting power cannot bypass the counter.
     if (!save_attempts(std::min<uint32_t>(attempts_ + 1, 1000))) return false;
     retry_at_ = esp_timer_get_time() + static_cast<int64_t>(retry_delay(attempts_)) * 1000000;
     uint8_t kek[32]{};
-    bool ok = derive_key(pin, header_.salt, kek) && decrypt(kek, header_.wrap_nonce, WrapAad, sizeof WrapAad,
+    bool ok = derive_key(credential, header_.salt, kek) && decrypt(kek, header_.wrap_nonce, WrapAad, sizeof WrapAad,
         header_.wrapped_key, 32, header_.wrap_tag, key_);
     wipe(kek, sizeof kek);
     if (!ok) {
         wipe(key_, 32);
         retry_at_=esp_timer_get_time()+static_cast<int64_t>(retry_delay(attempts_))*1000000;
-        return fail("Неверный PIN");
+        return fail(credential_kind()==CredentialKind::LegacyPin ? "Неверный PIN" : "Неверный рисунок");
     }
     Header h{};
     ok = inspect(slot_, h, cipher_.data()) && decrypt(key_, h.data_nonce, &h, offsetof(Header, data_tag),
@@ -134,17 +149,19 @@ bool Vault::save() {
     if (!ok) { lock(); return fail("Запись не подтверждена. Разблокируйте заново."); }
     header_ = next; slot_ = target; return true;
 }
-bool Vault::change_pin(const char* pin) {
-    if (status_ != VaultStatus::Unlocked || !valid_pin(pin)) return fail("Нужен PIN из 8–12 цифр");
+bool Vault::change_pattern(const char* pattern) {
+    if (status_ != VaultStatus::Unlocked || !valid_pattern(pattern)) return fail("Соедините 4–6 точек");
     Header next=header_;
+    next.version=2;
+    char credential[28]{}; pattern_credential(pattern,credential);
     uint8_t kek[32]{}; random_bytes(next.salt, 16); random_bytes(next.wrap_nonce, 12);
-    bool ok = derive_key(pin, next.salt, kek) && encrypt(kek, next.wrap_nonce, WrapAad, sizeof WrapAad,
-        key_, 32, next.wrapped_key, next.wrap_tag); wipe(kek, 32);
-    if(!ok) return fail("Не удалось изменить PIN");
+    bool ok = derive_key(credential, next.salt, kek) && encrypt(kek, next.wrap_nonce, WrapAad, sizeof WrapAad,
+        key_, 32, next.wrapped_key, next.wrap_tag); wipe(kek, 32); wipe(credential,sizeof credential);
+    if(!ok) return fail("Не удалось изменить ключ");
     header_=next;
-    // Overwrite both snapshots so an ordinary rollback cannot retain the previous PIN wrapper.
+    // Overwrite both snapshots so an ordinary rollback cannot retain the old credential.
     if(save() && save()) return true;
-    // A partial PIN change can leave either PIN committed. Re-read the real flash,
+    // A partial credential change can leave either credential committed. Re-read the real flash,
     // rather than trying to unlock with an uncommitted in-memory key wrapper.
     Header a{},b{};bool va=inspect(0,a,cipher_.data()),vb=inspect(1,b,cipher_.data());
     wipe(cipher_.data(),cipher_.size());

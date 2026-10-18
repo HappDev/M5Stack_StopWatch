@@ -6,14 +6,18 @@
 
 namespace otp {
 enum class VaultStatus { Empty, Locked, Unlocked, Damaged, StorageError };
+enum class CredentialKind { LegacyPin, Pattern };
 class Vault {
 public:
     bool begin();
     VaultStatus status() const { return status_; }
-    bool create(const char* pin);
-    bool unlock(const char* pin);
+    CredentialKind credential_kind() const { return header_.version == 1 ? CredentialKind::LegacyPin : CredentialKind::Pattern; }
+    bool ready() const { return status_ == VaultStatus::Unlocked && credential_kind() == CredentialKind::Pattern; }
+    bool create_pattern(const char* pattern);
+    bool unlock_pattern(const char* pattern);
+    bool unlock_legacy_pin(const char* pin);
     void lock();
-    bool change_pin(const char* pin);
+    bool change_pattern(const char* pattern);
     bool save();
     bool reset();
     bool replace(const Record* records, size_t count);
@@ -38,6 +42,7 @@ private:
     bool write_snapshot(const Header& h, const uint8_t* cipher, int slot);
     bool fail(const char* text);
     bool save_attempts(uint32_t value);
+    bool unlock_credential(const char* credential);
     std::array<Record, MaxRecords> records_{};
     std::array<uint8_t, MaxRecords * sizeof(Record)> cipher_{};
     uint8_t key_[32]{};
