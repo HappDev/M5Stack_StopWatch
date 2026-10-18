@@ -9,7 +9,7 @@ def main():
     verify(ROOT / 'dist/firmware')
     if (ROOT / 'dist/firmware/stopwatch-otp.factory.bin').exists():
         verify_browser_image(ROOT / 'dist/firmware')
-    paths = [ROOT / name for name in ('README.md', 'LICENSE', 'THIRD_PARTY.md', 'dependencies.json', 'package.json', 'start-web.cmd', 'start-web-lan.cmd', 'start-web-lan-mac.command', '.gitignore', '.gitattributes')]
+    paths = [ROOT / name for name in ('README.md', 'LICENSE', 'THIRD_PARTY.md', 'dependencies.json', 'package.json', 'start-web.cmd', 'start-web-lan.cmd', 'start-web-lan-mac.command', 'otp-usb.cmd', '.gitignore', '.gitattributes')]
     for folder in ('web', 'docs', 'tools', 'tests', 'firmware/main', 'firmware/assets', 'dist/firmware'):
         paths += [p for p in (ROOT / folder).rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc']
     paths += [ROOT / 'firmware' / name for name in ('CMakeLists.txt','sdkconfig.defaults','partitions.csv','dependencies.lock')]

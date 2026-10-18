@@ -22,3 +22,5 @@ dist/*
 .cache/tls/
 *.pem
 *.key
+private/
+.venv/
