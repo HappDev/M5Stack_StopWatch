@@ -65,34 +65,34 @@ bool Vault::save_attempts(uint32_t value) {
     }
     attempts_ = value; return true;
 }
-bool Vault::create_pattern(const char* pattern) {
+bool Vault::create_pattern(const char* pattern, const KdfService& service) {
     if (status_ != VaultStatus::Empty || !valid_pattern(pattern)) return fail("Соедините 4–6 точек");
     header_ = {}; header_.magic = Magic; header_.version = 2; header_.iterations = KdfIterations;
     char credential[28]{}; pattern_credential(pattern,credential);
     uint8_t kek[32]{}; random_bytes(key_, 32); random_bytes(header_.salt, 16); random_bytes(header_.wrap_nonce, 12);
-    bool ok = derive_key(credential, header_.salt, kek) && encrypt(kek, header_.wrap_nonce, WrapAad, sizeof WrapAad,
+    bool ok = derive_key(credential, header_.salt, kek, service) && encrypt(kek, header_.wrap_nonce, WrapAad, sizeof WrapAad,
         key_, 32, header_.wrapped_key, header_.wrap_tag);
     wipe(kek, sizeof kek); wipe(credential,sizeof credential);
     if (!ok || !save_attempts(0)) { lock(); return fail("Не удалось создать ключ"); }
     status_ = VaultStatus::Unlocked; count_ = 0;
     if (!save()) { status_ = VaultStatus::Damaged; lock(); return false; } return true;
 }
-bool Vault::unlock_legacy_pin(const char* pin) {
+bool Vault::unlock_legacy_pin(const char* pin, const KdfService& service) {
     if (credential_kind()!=CredentialKind::LegacyPin || !valid_pin(pin)) return fail("PIN недоступен или неверен");
-    return unlock_credential(pin);
+    return unlock_credential(pin,service);
 }
-bool Vault::unlock_pattern(const char* pattern) {
+bool Vault::unlock_pattern(const char* pattern, const KdfService& service) {
     if (credential_kind()!=CredentialKind::Pattern || !valid_pattern(pattern)) return fail("Соедините 4–6 точек");
     char credential[28]{}; pattern_credential(pattern,credential);
-    bool ok=unlock_credential(credential); wipe(credential,sizeof credential); return ok;
+    bool ok=unlock_credential(credential,service); wipe(credential,sizeof credential); return ok;
 }
-bool Vault::unlock_credential(const char* credential) {
+bool Vault::unlock_credential(const char* credential, const KdfService& service) {
     if (status_ != VaultStatus::Locked || wait_seconds()) return fail("Разблокировка пока недоступна");
     // Persist the attempt BEFORE the slow KDF: cutting power cannot bypass the counter.
     if (!save_attempts(std::min<uint32_t>(attempts_ + 1, 1000))) return false;
     retry_at_ = esp_timer_get_time() + static_cast<int64_t>(retry_delay(attempts_)) * 1000000;
     uint8_t kek[32]{};
-    bool ok = derive_key(credential, header_.salt, kek) && decrypt(kek, header_.wrap_nonce, WrapAad, sizeof WrapAad,
+    bool ok = derive_key(credential, header_.salt, kek, service) && decrypt(kek, header_.wrap_nonce, WrapAad, sizeof WrapAad,
         header_.wrapped_key, 32, header_.wrap_tag, key_);
     wipe(kek, sizeof kek);
     if (!ok) {
@@ -149,13 +149,13 @@ bool Vault::save() {
     if (!ok) { lock(); return fail("Запись не подтверждена. Разблокируйте заново."); }
     header_ = next; slot_ = target; return true;
 }
-bool Vault::change_pattern(const char* pattern) {
+bool Vault::change_pattern(const char* pattern, const KdfService& service) {
     if (status_ != VaultStatus::Unlocked || !valid_pattern(pattern)) return fail("Соедините 4–6 точек");
     Header next=header_;
     next.version=2;
     char credential[28]{}; pattern_credential(pattern,credential);
     uint8_t kek[32]{}; random_bytes(next.salt, 16); random_bytes(next.wrap_nonce, 12);
-    bool ok = derive_key(credential, next.salt, kek) && encrypt(kek, next.wrap_nonce, WrapAad, sizeof WrapAad,
+    bool ok = derive_key(credential, next.salt, kek, service) && encrypt(kek, next.wrap_nonce, WrapAad, sizeof WrapAad,
         key_, 32, next.wrapped_key, next.wrap_tag); wipe(kek, 32); wipe(credential,sizeof credential);
     if(!ok) return fail("Не удалось изменить ключ");
     header_=next;

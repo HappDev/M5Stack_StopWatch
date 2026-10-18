@@ -1,4 +1,5 @@
 #include "board.h"
+#include "clock.h"
 #include "protocol.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -10,6 +11,7 @@ static otp::Ui ui(vault, usb_authorized);
 static otp::Protocol protocol(vault, ui, usb_authorized);
 extern "C" void app_main() {
     vault.begin();
+    otp::clock_begin();
     if(!board::begin()) { while(true) vTaskDelay(pdMS_TO_TICKS(1000)); }
     ui.begin();
     const bool usb_ok=protocol.begin();

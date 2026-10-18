@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <functional>
 
 namespace otp {
 constexpr size_t MaxRecords = 100;
@@ -28,7 +29,8 @@ bool base32_decode(const char* text, uint8_t* out, size_t cap, size_t& length);
 std::string base32_encode(const uint8_t* bytes, size_t length);
 const char* algorithm_name(Algorithm a);
 bool totp(const Record& r, uint64_t timestamp, char out[9]);
-bool derive_key(const char* pin, const uint8_t salt[16], uint8_t key[32]);
+using KdfService = std::function<void()>;
+bool derive_key(const char* pin, const uint8_t salt[16], uint8_t key[32], const KdfService& service = {});
 bool random_bytes(void* output, size_t size);
 bool encrypt(const uint8_t key[32], const uint8_t nonce[12], const void* aad, size_t aad_len,
              const void* plain, size_t size, void* cipher, uint8_t tag[16]);

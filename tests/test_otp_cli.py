@@ -51,6 +51,15 @@ class FakeSerial:
         self.is_open = False
 
 class CliTests(unittest.TestCase):
+    def test_time_sends_computer_offset_and_utc_epoch(self):
+        for offset in (-720, -210, 345, 840):
+            with patch.object(cli, 'Device') as device_class, patch.object(cli.time, 'time', return_value=1234567890.5), patch.object(cli.datetime, 'datetime') as local_time, contextlib.redirect_stdout(io.StringIO()):
+                local_time.fromtimestamp.return_value.astimezone.return_value.utcoffset.return_value = cli.datetime.timedelta(minutes=offset)
+                device = device_class.return_value.__enter__.return_value
+                device.wait_authorized.return_value = {'timeValid':True}
+                self.assertEqual(cli.main(['--port','test','time']), 0)
+                device.request.assert_called_once_with('time_set', {'epoch':1234567890, 'utcOffsetMinutes':offset})
+
     def test_batch_one_confirmation_and_preserved_uuid(self):
         calls = []
         class Device:

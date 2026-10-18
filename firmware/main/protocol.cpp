@@ -1,5 +1,6 @@
 #include "protocol.h"
 #include "board.h"
+#include "clock.h"
 #include <tinyusb.h>
 #include <tusb_cdc_acm.h>
 #include <tusb.h>
@@ -107,6 +108,8 @@ void Protocol::disconnected() {
 void Protocol::status(int id) {
     auto* o=object(); cJSON_AddStringToObject(o,"firmware","0.1.0");
     cJSON_AddBoolToObject(o,"batchImport",true);
+    if(display_offset_known()) cJSON_AddNumberToObject(o,"utcOffsetMinutes",display_offset_minutes());
+    else cJSON_AddNullToObject(o,"utcOffsetMinutes");
     const char* state = vault_.status()==VaultStatus::Empty?"empty":vault_.status()==VaultStatus::Locked?"locked":
         vault_.status()==VaultStatus::Unlocked?(vault_.ready()?"unlocked":"locked"):vault_.status()==VaultStatus::Damaged?"damaged":"storage_error";
     cJSON_AddStringToObject(o,"state",state); cJSON_AddBoolToObject(o,"authorized",authorized_ && vault_.ready());
@@ -212,14 +215,18 @@ void Protocol::receive(char* line) {
         question=std::string("Удалить аккаунт?\n")+found->issuer+"\n"+found->account;
     } else if (!strcmp(op,"time_set")) {
         int64_t epoch;if(!integer(args,"epoch",epoch,946684800,4102444799LL)) { error(id,"INPUT","Неверное время UTC");return; }
-        time_t t=epoch;tm utc{};
+        int64_t offset=display_offset_minutes();
+        if(cJSON_HasObjectItem(args,"utcOffsetMinutes") && !integer(args,"utcOffsetMinutes",offset,-720,840)) {
+            error(id,"INPUT","Неверный часовой пояс");return;
+        }
+        time_t t=epoch+offset*60;tm utc{};
         #ifdef _WIN32
         gmtime_s(&utc,&t);
         #else
         gmtime_r(&t,&utc);
         #endif
-        char date[48];strftime(date,sizeof date,"%Y-%m-%d\n%H:%M:%S UTC",&utc);
-        question=std::string("Установить время?\n")+date;
+        char date[48],zone[20];strftime(date,sizeof date,"%Y-%m-%d\n%H:%M:%S",&utc);format_zone(static_cast<int>(offset),zone,sizeof zone);
+        question=std::string("Установить время?\n")+date+"\n"+zone;
         // Apply elapsed confirmation time, rather than the stale timestamp from request arrival.
     } else if (!strcmp(op,"export_begin")) {
         clear_transfers();question="Передать все секреты\nэтому компьютеру?\nСоздавайте копию только\nна доверенном ПК.";
@@ -250,12 +257,14 @@ void Protocol::receive(char* line) {
         } else if(!strcmp(op,"time_set")) {
             int64_t epoch=static_cast<int64_t>(cJSON_GetObjectItemCaseSensitive(args,"epoch")->valuedouble);
             ok=board::set_time(epoch+(esp_timer_get_time()-received_at)/1000000);
+            if(ok && cJSON_HasObjectItem(args,"utcOffsetMinutes"))
+                ok=set_display_offset(static_cast<int>(cJSON_GetObjectItemCaseSensitive(args,"utcOffsetMinutes")->valuedouble));
         } else if(!strcmp(op,"export_begin")) {
             exporting_=vault_.count()>0;export_index_=0;auto* o=object();cJSON_AddNumberToObject(o,"count",vault_.count());reply(id,o);return;
         } else if(!strcmp(op,"import_commit")) {
             ok=importing_ && staged_==expected_ && vault_.replace(staging_.data(),import_count_);clear_transfers();
         } else if(!strcmp(op,"restore_commit")) { ok=vault_.replace(staging_.data(),staged_);clear_transfers(); }
-        if(ok) reply(id,object());else error(id,"FAILED",!strcmp(op,"time_set")?"Не удалось записать RTC":vault_.error());
+        if(ok) reply(id,object());else error(id,"FAILED",!strcmp(op,"time_set")?"Не удалось записать часы или часовой пояс":vault_.error());
         ui_.refresh();
     });
     if(!asked) {pending_=false;error(id,"BUSY","На экране уже есть запрос");}

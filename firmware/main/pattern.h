@@ -8,9 +8,10 @@ bool valid_pattern(const char* pattern);
 
 class PatternGesture {
 public:
-    static constexpr int Radius = 34;
-    static constexpr int center_x(int point) { return 50 + ((point - 1) % 3) * 120; }
-    static constexpr int center_y(int point) { return 50 + ((point - 1) / 3) * 120; }
+    static constexpr int Radius = 27;
+    static constexpr int PanelX = 97, PanelY = 122, PanelWidth = 272, PanelHeight = 256;
+    static constexpr int center_x(int point) { return 40 + ((point - 1) % 3) * 96; }
+    static constexpr int center_y(int point) { return 40 + ((point - 1) / 3) * 96; }
     void clear();
     void start(int x, int y);
     void move(int x, int y);

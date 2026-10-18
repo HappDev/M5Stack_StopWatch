@@ -1,6 +1,6 @@
 // Browser QA fixture only. Never served by tools/server.py or included in a release.
 const sample={id:'00000000-0000-4000-8000-000000000001',issuer:'Example',account:'test@example.com',secret:'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ',algorithm:'SHA1',digits:6,period:30};
-let records=[sample], staged=[], exported=[], authorized=true, importCount=0;
+let records=[sample], staged=[], exported=[], authorized=true, importCount=0, utcOffsetMinutes=null;
 const port={
   async open(){
     authorized=true;
@@ -9,7 +9,8 @@ const port={
       const req=JSON.parse(new TextDecoder().decode(bytes));let result={};
       const args=req.args;
       switch(req.op){
-        case 'status':result={firmware:'TEST-FIXTURE',batchImport:true,state:'unlocked',authorized,timeValid:true,time:Math.floor(Date.now()/1000),batteryMv:3900};break;
+        case 'status':result={firmware:'TEST-FIXTURE',batchImport:true,utcOffsetMinutes,state:'unlocked',authorized,timeValid:true,time:Math.floor(Date.now()/1000),batteryMv:3900};break;
+        case 'time_set':if(args.utcOffsetMinutes!==undefined)utcOffsetMinutes=args.utcOffsetMinutes;break;
         case 'list':result={total:records.length,records:records.slice(args.offset,args.offset+5).map(({secret,...r})=>r)};break;
         case 'upsert':records.push(args.record);break;
         case 'import_begin':staged=[];importCount=args.count;break;

@@ -1,10 +1,15 @@
 #include "ui.h"
 #include "board.h"
+#include "clock.h"
 #include <esp_timer.h>
 #include <esp_sleep.h>
 #include <algorithm>
 #include <cstdio>
 #include <utility>
+#ifdef ESP_PLATFORM
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
 extern const lv_font_t font_ru;
 
 namespace otp {
@@ -29,6 +34,52 @@ lv_obj_t* Ui::button(const char* text, int x, int y, int w, int h, std::function
     lv_obj_add_event_cb(o,click,LV_EVENT_CLICKED,callback); lv_obj_add_event_cb(o,deleted,LV_EVENT_DELETE,callback);
     return o;
 }
+lv_obj_t* Ui::icon_button(bool settings,int x,std::function<void()> action) {
+    auto* o=button(settings?LV_SYMBOL_SETTINGS:"",x,209,48,48,std::move(action));
+    lv_obj_set_style_radius(o,LV_RADIUS_CIRCLE,0);lv_obj_set_style_pad_all(o,0,0);
+    if(settings) lv_obj_set_style_text_font(lv_obj_get_child(o,0),&lv_font_montserrat_28,0);
+    else {
+        auto* shackle=lv_obj_create(o);lv_obj_set_pos(shackle,17,10);lv_obj_set_size(shackle,14,19);
+        lv_obj_set_style_bg_opa(shackle,LV_OPA_TRANSP,0);lv_obj_set_style_border_width(shackle,2,0);
+        lv_obj_set_style_border_color(shackle,lv_color_hex(0xe8f4f2),0);lv_obj_set_style_radius(shackle,8,0);
+        auto* body=lv_obj_create(o);lv_obj_set_pos(body,13,23);lv_obj_set_size(body,22,15);
+        lv_obj_set_style_bg_color(body,lv_color_hex(0xe8f4f2),0);lv_obj_set_style_border_width(body,0,0);lv_obj_set_style_radius(body,3,0);
+        for(auto* part:{shackle,body}) {lv_obj_remove_flag(part,LV_OBJ_FLAG_CLICKABLE);lv_obj_remove_flag(part,LV_OBJ_FLAG_SCROLLABLE);}
+    }
+    return o;
+}
+void Ui::update_clock() {
+    if(!clock_label_) return;
+    char text[32];format_display_time(board::now(),board::rtc_valid(),text,sizeof text);lv_label_set_text(clock_label_,text);
+}
+void Ui::update_codes() {
+    if(!vault_.ready() || busy_) return;
+    const bool valid=board::rtc_valid();const int64_t now=board::now();
+    for(size_t i=0;i<vault_.count();++i) if(list_codes_[i]) {
+        const auto& r=vault_.record(i);const int64_t step=valid?now/r.period:-2;
+        if(list_steps_[i]!=step) {
+            char code[9]{};
+            if(!valid || !totp(r,now,code)) strcpy(code,r.digits==8?"--------":"------");
+            lv_label_set_text(list_codes_[i],code);list_steps_[i]=step;wipe(code,sizeof code);
+        }
+    }
+    if(view_==View::Code && code_label_ && selected_<vault_.count()) {
+        const auto& r=vault_.record(selected_);char code[9]{},text[64];
+        if(!valid || !totp(r,now,code)) {strcpy(code,"-- -- --");strcpy(text,"Синхронизируйте время");}
+        else snprintf(text,sizeof text,"Ещё %u с",static_cast<unsigned>(r.period-now%r.period));
+        lv_label_set_text(code_label_,code);lv_label_set_text(seconds_label_,text);wipe(code,sizeof code);
+    }
+}
+void Ui::start_busy(bool saving) {
+    busy_=true;saving_=saving;busy_frame_=millis();render();lv_refr_now(nullptr);
+}
+void Ui::service_busy() {
+    if(millis()-busy_frame_<33) return;
+    busy_frame_=millis();update_clock();lv_timer_handler();
+    #ifdef ESP_PLATFORM
+    vTaskDelay(pdMS_TO_TICKS(1));
+    #endif
+}
 void Ui::begin() {
     lv_obj_add_event_cb(lv_screen_active(),[](lv_event_t* e) { static_cast<Ui*>(lv_event_get_user_data(e))->touch(); },
                         LV_EVENT_PRESSED,this);
@@ -41,6 +92,7 @@ bool Ui::session_expired() const {
     return vault_.ready() && esp_timer_get_time() - unlocked_at_ >= UnlockDurationUs;
 }
 bool Ui::touch() {
+    if(busy_) return false;
     const bool expired = session_expired(), was_dark = dark_;
     if (expired) lock(dark_);
     last_activity_ = millis();
@@ -58,7 +110,7 @@ void Ui::dim() {
 void Ui::recovery() {
     wipe(pin_,sizeof pin_); pin_len_=0; wipe(first_,sizeof first_);
     gesture_.clear(); wipe(pattern_path_,sizeof pattern_path_);
-    pattern_submit_=pattern_second_=pattern_change_=false;
+    pattern_submit_=pin_submit_=pattern_second_=pattern_change_=false;
     view_=View::Recovery; render();
 }
 void Ui::message(const char* text) { text_ = text; view_ = View::Error; render(); }
@@ -67,17 +119,18 @@ void Ui::cancel() {
     if (action) action(false);
 }
 void Ui::lock(bool dark) {
+    if(busy_) return;
     cancel(); usb_ = false;
     if(on_lock_) on_lock_();
     if(!text_.empty()) wipe(text_.data(),text_.size());
     text_.clear();
     vault_.lock(); unlocked_at_=0; wipe(pin_,sizeof pin_); wipe(first_,sizeof first_);
-    gesture_.clear(); wipe(pattern_path_,sizeof pattern_path_); pattern_submit_=false;
+    gesture_.clear(); wipe(pattern_path_,sizeof pattern_path_); pattern_submit_=pin_submit_=false;
     pin_len_ = 0; pattern_change_ = pattern_second_ = false; view_ = auth_view(); render();
     if (dark) { lv_refr_now(nullptr); dark_ = true; board::screen(false); }
 }
 bool Ui::ask(const std::string& text, std::function<void(bool)> action) {
-    if (pending_) return false;
+    if (pending_ || busy_) return false;
     text_ = text; pending_ = std::move(action); answer_ = -1; view_ = View::Confirm; render(); return true;
 }
 void Ui::refresh() {
@@ -91,12 +144,11 @@ void Ui::pin_key(int key) {
     if (pin_label_) { char mask[13]{}; memset(mask,'*',pin_len_); lv_label_set_text(pin_label_,mask); }
 }
 void Ui::submit_pin() {
-    if (busy_ || vault_.wait_seconds() || vault_.credential_kind()!=CredentialKind::LegacyPin || vault_.status()!=VaultStatus::Locked) return;
+    pin_submit_=false;
+    if (busy_ || view_!=View::Pin || vault_.wait_seconds() || vault_.credential_kind()!=CredentialKind::LegacyPin || vault_.status()!=VaultStatus::Locked) return;
     if (!Vault::valid_pin(pin_)) { if (info_label_) lv_label_set_text(info_label_,"Введите 8–12 цифр"); return; }
-    busy_=true;
-    if (info_label_) lv_label_set_text(info_label_,"Проверка…");
-    lv_refr_now(nullptr);
-    bool ok = vault_.unlock_legacy_pin(pin_);
+    start_busy(false);
+    bool ok = vault_.unlock_legacy_pin(pin_,[this]{service_busy();});
     wipe(pin_,sizeof pin_); pin_len_ = 0; busy_=false;
     touch();
     if (ok) { usb_=false; view_ = View::Pattern; render(); }
@@ -159,10 +211,9 @@ void Ui::submit_pattern() {
         wipe(first_,sizeof first_); wipe(pattern,sizeof pattern); pattern_second_=false;
         render(); if (info_label_) lv_label_set_text(info_label_,"Рисунки не совпали"); return;
     }
-    busy_=true; draw_pattern();
-    if (info_label_) lv_label_set_text(info_label_,"Проверка…");
-    lv_refr_now(nullptr);
-    bool ok=create ? vault_.create_pattern(pattern) : enroll ? vault_.change_pattern(pattern) : vault_.unlock_pattern(pattern);
+    start_busy(enroll);
+    KdfService service=[this]{service_busy();};
+    bool ok=create ? vault_.create_pattern(pattern,service) : enroll ? vault_.change_pattern(pattern,service) : vault_.unlock_pattern(pattern,service);
     wipe(pattern,sizeof pattern); wipe(first_,sizeof first_); pattern_second_=pattern_change_=false; busy_=false;
     if (ok && vault_.ready()) unlocked_at_=esp_timer_get_time();
     touch();
@@ -187,12 +238,19 @@ void Ui::render() {
     if ((view_==View::List || view_==View::Code || view_==View::Settings) && !vault_.ready()) view_=auth_view();
     retry_visible_=false;
     pattern_panel_=pattern_line_=nullptr; std::fill(std::begin(pattern_dots_),std::end(pattern_dots_),nullptr);
-    pin_label_ = code_label_ = seconds_label_ = info_label_ = nullptr;
+    pin_label_ = code_label_ = seconds_label_ = info_label_ = clock_label_ = nullptr;
+    list_codes_.fill(nullptr);list_steps_.fill(-1);last_second_=UINT32_MAX;
     auto screen = lv_screen_active(); lv_obj_clean(screen);
     rendered_time_valid_=board::rtc_valid(); rendered_usb_=usb_;
     lv_obj_set_style_bg_color(screen,lv_color_hex(0x081615),0); lv_obj_remove_flag(screen,LV_OBJ_FLAG_SCROLLABLE);
-    char status[64]; snprintf(status,sizeof status,"%u мВ  %s",board::battery_mv(),usb_ ? "USB открыт" : "OTP");
-    label(status,110,23,246);
+    clock_label_=label("",110,23,246);update_clock();
+    if(busy_) {
+        auto* spinner=lv_spinner_create(screen);lv_obj_set_pos(spinner,197,188);lv_obj_set_size(spinner,72,72);
+        lv_spinner_set_anim_params(spinner,900,220);
+        lv_obj_set_style_arc_color(spinner,lv_color_hex(0x173c39),LV_PART_MAIN);
+        lv_obj_set_style_arc_color(spinner,lv_color_hex(0x63e6c2),LV_PART_INDICATOR);
+        label(saving_?"Сохранение ключа…":"Проверка ключа…",70,285,326);return;
+    }
     if (vault_.status() == VaultStatus::Damaged || vault_.status() == VaultStatus::StorageError) {
         if (view_ != View::Confirm) {
             label("Хранилище недоступно",70,100,326); label("Восстановите резервную копию\nпосле сброса устройства.",70,160,326);
@@ -204,22 +262,23 @@ void Ui::render() {
         char mask[13]{}; memset(mask,'*',pin_len_); lv_label_set_text(pin_label_,mask);
         for (int i = 0; i < 9; ++i) button(std::to_string(i+1).c_str(),113+(i%3)*83,130+(i/3)*48,74,42,[this,i]{pin_key(i+1);});
         button("<",113,274,74,42,[this]{pin_key(10);}); button("0",196,274,74,42,[this]{pin_key(0);});
-        button("OK",279,274,74,42,[this]{submit_pin();});
+        button("OK",279,274,74,42,[this]{pin_submit_=true;});
         info_label_ = label("8–12 цифр",85,329,296);
         button("Помощь",168,377,130,38,[this]{recovery();});
     } else if (view_ == View::Pattern) {
         bool enroll=pattern_change_ || vault_.status()==VaultStatus::Empty || vault_.credential_kind()==CredentialKind::LegacyPin;
         label(pattern_second_ ? "Повторите рисунок" : enroll ? "Создайте ключ" : "Нарисуйте ключ",75,55,316);
-        pattern_panel_=lv_obj_create(screen); lv_obj_set_pos(pattern_panel_,63,88); lv_obj_set_size(pattern_panel_,340,320);
+        pattern_panel_=lv_obj_create(screen); lv_obj_set_pos(pattern_panel_,PatternGesture::PanelX,PatternGesture::PanelY);
+        lv_obj_set_size(pattern_panel_,PatternGesture::PanelWidth,PatternGesture::PanelHeight);
         lv_obj_set_style_pad_all(pattern_panel_,0,0); lv_obj_set_style_border_width(pattern_panel_,0,0);
         lv_obj_set_style_bg_opa(pattern_panel_,LV_OPA_TRANSP,0);
         lv_obj_remove_flag(pattern_panel_,LV_OBJ_FLAG_SCROLLABLE); lv_obj_add_flag(pattern_panel_,LV_OBJ_FLAG_PRESS_LOCK);
         lv_obj_add_event_cb(pattern_panel_,pattern_event,LV_EVENT_ALL,this);
         pattern_line_=lv_line_create(pattern_panel_); lv_obj_remove_flag(pattern_line_,LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_line_width(pattern_line_,5,0); lv_obj_set_style_line_rounded(pattern_line_,true,0);
+        lv_obj_set_style_line_width(pattern_line_,4,0); lv_obj_set_style_line_rounded(pattern_line_,true,0);
         for (int p=1;p<=9;++p) {
             auto* dot=lv_obj_create(pattern_panel_); pattern_dots_[p-1]=dot;
-            lv_obj_set_size(dot,26,26); lv_obj_set_pos(dot,PatternGesture::center_x(p)-13,PatternGesture::center_y(p)-13);
+            lv_obj_set_size(dot,21,21); lv_obj_set_pos(dot,PatternGesture::center_x(p)-10,PatternGesture::center_y(p)-10);
             lv_obj_set_style_radius(dot,LV_RADIUS_CIRCLE,0); lv_obj_set_style_border_width(dot,0,0);
             lv_obj_remove_flag(dot,LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(dot,LV_OBJ_FLAG_SCROLLABLE);
         }
@@ -233,20 +292,29 @@ void Ui::render() {
     } else if (view_ == View::List) {
         const bool needs_usb=!rendered_time_valid_ || !vault_.count();
         label("Аккаунты",100,65,266);
-        auto panel = lv_obj_create(screen); lv_obj_set_pos(panel,67,105); lv_obj_set_size(panel,332,needs_usb?184:248);
+        auto panel = lv_obj_create(screen); lv_obj_set_pos(panel,68,105); lv_obj_set_size(panel,330,needs_usb?184:260);
         lv_obj_set_style_bg_opa(panel,LV_OPA_TRANSP,0); lv_obj_set_style_border_width(panel,0,0);
         lv_obj_set_style_pad_all(panel,0,0); lv_obj_set_scroll_dir(panel,LV_DIR_VER);
         for (size_t i = 0; i < vault_.count(); ++i) {
-            const auto& r = vault_.record(i); std::string name = std::string(r.issuer) + "\n" + r.account;
-            auto b = button(name.c_str(),0,static_cast<int>(i*72),312,64,[this,i]{select(i);});
+            const auto& r = vault_.record(i);
+            auto b = button("",0,static_cast<int>(i*72),314,64,[this,i]{select(i);});
             lv_obj_set_parent(b,panel);
-            auto l = lv_obj_get_child(b,0); lv_obj_set_width(l,285); lv_label_set_long_mode(l,LV_LABEL_LONG_DOT);
-            lv_obj_set_height(l,48);
+            lv_obj_set_style_pad_all(b,0,0);
+            auto* name=lv_obj_get_child(b,0);lv_obj_set_align(name,LV_ALIGN_TOP_LEFT);lv_obj_set_pos(name,8,8);lv_obj_set_size(name,144,24);
+            lv_obj_set_style_text_align(name,LV_TEXT_ALIGN_LEFT,0);
+            lv_label_set_text(name,r.issuer);lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);
+            auto* account=lv_label_create(b);lv_obj_set_pos(account,8,32);lv_obj_set_size(account,144,24);
+            lv_obj_set_style_text_font(account,&font_ru,0);lv_label_set_text(account,r.account);lv_label_set_long_mode(account,LV_LABEL_LONG_DOT);
+            lv_obj_set_style_text_color(account,lv_color_hex(0xa2bdb8),0);lv_obj_set_style_text_align(account,LV_TEXT_ALIGN_LEFT,0);
+            auto* code=lv_label_create(b);lv_obj_set_pos(code,162,16);lv_obj_set_width(code,144);
+            lv_obj_set_style_text_font(code,&lv_font_montserrat_28,0);lv_obj_set_style_text_align(code,LV_TEXT_ALIGN_RIGHT,0);
+            list_codes_[i]=code;
+            for(auto* child:{name,account,code})lv_obj_remove_flag(child,LV_OBJ_FLAG_CLICKABLE);
         }
         if (!vault_.count()) label("Добавьте аккаунт\nчерез сайт и USB",85,175,296);
         if (needs_usb) button(usb_ ? "Закрыть USB" : "Разрешить USB",98,304,270,48,[this]{settings_action(0);});
-        button("Настройки",101,370,160,45,[this]{view_=View::Settings;render();});
-        button("Замок",273,370,92,45,[this]{lock();});
+        icon_button(true,10,[this]{view_=View::Settings;render();});
+        icon_button(false,408,[this]{lock();});
     } else if (view_ == View::Code) {
         if (selected_ >= vault_.count()) { view_ = View::List; render(); return; }
         const auto& r = vault_.record(selected_);
@@ -262,7 +330,8 @@ void Ui::render() {
         button(usb_ ? "Закрыть USB" : "Разрешить USB",98,115,270,48,[this]{settings_action(0);});
         button("Сменить ключ",98,178,270,48,[this]{settings_action(1);});
         button("Сбросить всё",98,241,270,48,[this]{settings_action(2);});
-        label(board::rtc_valid() ? "Время UTC установлено" : "Синхронизируйте время",75,308,316);
+        char zone[20];format_zone(display_offset_minutes(),zone,sizeof zone);
+        label(board::rtc_valid() ? zone : "Синхронизируйте время",75,308,316);
         button("Назад",153,365,160,45,[this]{view_=View::List;render();});
     } else if (view_ == View::Confirm) {
         label("Подтверждение",75,70,316);
@@ -274,8 +343,10 @@ void Ui::render() {
     } else {
         label(text_.c_str(),70,140,326); button("Назад",153,330,160,50,[this]{view_=vault_.ready()?View::List:auth_view();render();});
     }
+    update_codes();
 }
 void Ui::tick() {
+    if(busy_) return;
     if (session_expired()) lock(dark_);
     if(board::wake_touch()) touch();
     bool a = board::button_a(), b = board::button_b(), held = board::button_b_held();
@@ -308,11 +379,13 @@ void Ui::tick() {
     }
     if (millis() - last_activity_ >= 30000 && !dark_) dim();
     if (pattern_submit_) submit_pattern();
+    if (pin_submit_) submit_pin();
     if (!dark_ && (view_==View::List || view_==View::Code || view_==View::Settings) &&
         (rendered_time_valid_!=board::rtc_valid() || rendered_usb_!=usb_)) render();
     uint32_t second = millis()/1000;
     if (second != last_second_ && !dark_) {
         last_second_ = second;
+        update_clock();update_codes();
         if ((view_ == View::Pin || view_==View::Pattern) && info_label_) {
             const auto wait=vault_.wait_seconds();
             if(wait) {
@@ -321,16 +394,6 @@ void Ui::tick() {
             } else if(retry_visible_) {
                 lv_label_set_text(info_label_,view_==View::Pin?"Введите 8–12 цифр":"Соедините 4–6 точек");retry_visible_=false;
             }
-        }
-        if (view_ == View::Code && code_label_) {
-            const auto& r = vault_.record(selected_); char code[9]{};
-            if (!board::rtc_valid() || !totp(r,board::now(),code)) {
-                lv_label_set_text(code_label_,"-- -- --"); lv_label_set_text(seconds_label_,"Синхронизируйте время");
-            } else {
-                lv_label_set_text(code_label_,code); char text[32];
-                snprintf(text,sizeof text,"Ещё %u с",static_cast<unsigned>(r.period - board::now()%r.period)); lv_label_set_text(seconds_label_,text);
-            }
-            wipe(code,sizeof code);
         }
     }
     if (dark_ && !board::usb_power()) {

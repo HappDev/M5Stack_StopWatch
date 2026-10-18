@@ -111,7 +111,7 @@ $('connect').addEventListener('click',async()=>{
   }catch(error){notice(error.name==='NotFoundError'?'USB-порт не выбран.':error.message,true);}
   finally{busy=false;render();}
 });
-$('sync').addEventListener('click',()=>operate(()=>device.request('time_set',{epoch:Math.floor(Date.now()/1000)}),'Время передано устройству.'));
+$('sync').addEventListener('click',()=>operate(()=>device.request('time_set',{epoch:Math.floor(Date.now()/1000),utcOffsetMinutes:-new Date().getTimezoneOffset()}),'Время и часовой пояс переданы устройству.'));
 $('lock').addEventListener('click',()=>operate(()=>device.request('lock'),'StopWatch заблокирован.'));
 const fields=`<label class="field">Сервис<input id="issuer" maxlength="96" placeholder="Например, GitHub" autocomplete="off"></label>
 <label class="field">Аккаунт<input id="account" maxlength="128" placeholder="name@example.com" autocomplete="off"></label>`;

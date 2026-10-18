@@ -1,5 +1,6 @@
 #include "vault.h"
 #include "pattern.h"
+#include "clock.h"
 #include "protocol.h"
 #include <tinyusb.h>
 #include <tusb_cdc_acm.h>
@@ -25,6 +26,10 @@ static int cut_after=-1;
 static bool usb_connected=false;
 static int64_t applied_time=0;
 static bool rtc_ok=true;
+static int64_t board_epoch=1234567890;
+static bool offset_exists=false;
+static uint32_t stored_offset=0,pending_offset=0;
+static int64_t clock_read_step_us=0;
 static std::string usb_rx,usb_tx;
 static std::function<void(bool)> confirm_action;
 static unsigned confirmation_count=0;
@@ -35,7 +40,7 @@ bool tud_cdc_connected(){return usb_connected;}
 size_t tinyusb_cdcacm_write_queue(int,const uint8_t* p,size_t n){usb_tx.append(reinterpret_cast<const char*>(p),n);return n;}
 esp_err_t tinyusb_cdcacm_write_flush(int,int){return ESP_OK;}
 esp_err_t tinyusb_cdcacm_read(int,uint8_t* p,size_t cap,size_t* n){*n=std::min(cap,usb_rx.size());memcpy(p,usb_rx.data(),*n);usb_rx.erase(0,*n);return ESP_OK;}
-namespace board {bool rtc_valid(){return rtc_ok;}int64_t now(){return 1234567890;}bool set_time(int64_t t){applied_time=t;rtc_ok=true;return true;}uint16_t battery_mv(){return 3900;}}
+namespace board {bool rtc_valid(){return rtc_ok;}int64_t now(){return board_epoch;}bool set_time(int64_t t){applied_time=t;rtc_ok=true;return true;}uint16_t battery_mv(){return 3900;}}
 namespace otp {
 #ifndef STOPWATCH_UI_TESTS
 bool Ui::ask(const std::string& text,std::function<void(bool)> action){if(confirm_action)return false;++confirmation_count;confirmation_text=text;confirm_action=std::move(action);return true;}
@@ -44,7 +49,7 @@ void Ui::lock(bool){usb_=false;cancel();if(on_lock_)on_lock_();vault_.lock();}
 void Ui::refresh(){}
 #endif
 }
-static void fresh() {for(auto& p:flash)p.assign(0x80000,255);counter_exists=false;counter=0;clock_us=0;cut_after=-1;commit_fail=false;rtc_ok=true;}
+static void fresh() {for(auto& p:flash)p.assign(0x80000,255);counter_exists=false;counter=0;clock_us=0;cut_after=-1;commit_fail=false;rtc_ok=true;board_epoch=1234567890;clock_read_step_us=0;offset_exists=false;otp::clock_begin();}
 const esp_partition_t* esp_partition_find_first(int,int,const char* name){for(auto& p:partitions)if(!strcmp(p.label,name))return &p;return nullptr;}
 esp_err_t esp_partition_read(const esp_partition_t* p,size_t off,void* data,size_t n){if(off+n>p->size)return ESP_FAIL;memcpy(data,flash[p->slot].data()+off,n);return ESP_OK;}
 static bool cut(){if(cut_after<0)return false;if(cut_after==0)return true;--cut_after;return false;}
@@ -56,11 +61,12 @@ esp_err_t esp_partition_write(const esp_partition_t* p,size_t off,const void* da
 }
 esp_err_t esp_partition_erase_range(const esp_partition_t* p,size_t off,size_t n){if(off+n>p->size)return ESP_FAIL;bool fail=cut();std::fill_n(flash[p->slot].begin()+off,fail?n/2:n,255);return fail?ESP_FAIL:ESP_OK;}
 esp_err_t nvs_flash_init(){return ESP_OK;}
-esp_err_t nvs_open(const char*,int,nvs_handle_t* h){*h=1;return ESP_OK;}
-esp_err_t nvs_get_u32(nvs_handle_t,const char*,uint32_t* value){if(!counter_exists)return ESP_ERR_NVS_NOT_FOUND;*value=counter;return ESP_OK;}
-esp_err_t nvs_set_u32(nvs_handle_t,const char*,uint32_t value){pending_counter=value;return ESP_OK;}
-esp_err_t nvs_commit(nvs_handle_t){if(commit_fail)return ESP_FAIL;counter=pending_counter;counter_exists=true;return ESP_OK;}
-int64_t esp_timer_get_time(){return clock_us;}
+esp_err_t nvs_open(const char* name,int,nvs_handle_t* h){*h=!strcmp(name,"display")?2:1;return ESP_OK;}
+void nvs_close(nvs_handle_t){}
+esp_err_t nvs_get_u32(nvs_handle_t h,const char*,uint32_t* value){if(h==2){if(!offset_exists)return ESP_ERR_NVS_NOT_FOUND;*value=stored_offset;}else{if(!counter_exists)return ESP_ERR_NVS_NOT_FOUND;*value=counter;}return ESP_OK;}
+esp_err_t nvs_set_u32(nvs_handle_t h,const char*,uint32_t value){if(h==2)pending_offset=value;else pending_counter=value;return ESP_OK;}
+esp_err_t nvs_commit(nvs_handle_t h){if(commit_fail)return ESP_FAIL;if(h==2){stored_offset=pending_offset;offset_exists=true;}else{counter=pending_counter;counter_exists=true;}return ESP_OK;}
+int64_t esp_timer_get_time(){clock_us+=clock_read_step_us;return clock_us;}
 uint32_t esp_rom_crc32_le(uint32_t crc,const uint8_t* data,size_t n){crc=~crc;for(size_t i=0;i<n;i++){crc^=data[i];for(int b=0;b<8;b++)crc=(crc>>1)^((crc&1)?0xedb88320u:0);}return ~crc;}
 void bootloader_random_enable(){}
 void bootloader_random_disable(){}
@@ -175,6 +181,10 @@ static void crypto_interop(){
     uint8_t salt[16],key[32],zero[32]{},nonce[12]{},plain[16]{},cipher[16]{},tag[16]{};
     for(unsigned i=0;i<16;i++)salt[i]=i;
     assert(otp::derive_key("12345678",salt,key));
+    assert(!memcmp(key,hex("1f0be1be8f35627c8cdf3e7f396a01f5dac7da508e5830499d41f9b6d8baeafe").data(),32));
+    unsigned services=0;
+    assert(otp::derive_key("12345678",salt,key,[&]{++services;}));
+    assert(services==otp::KdfIterations/2048);
     assert(!memcmp(key,hex("1f0be1be8f35627c8cdf3e7f396a01f5dac7da508e5830499d41f9b6d8baeafe").data(),32));
     // Independent Python hashlib/OpenSSL vectors, including the sixth point.
     const char* kdf_vectors[][2]={
@@ -370,6 +380,32 @@ static void migration_usb() {
     assert(v.count()==1&&!v.ready());ui.lock();assert(v.status()==otp::VaultStatus::Locked);
     puts("PASS: pending PIN migration rejects USB metadata, export and mutations even with stale authorization");
 }
+static void display_clock_tests() {
+    fresh();char text[48];
+    assert(!otp::display_offset_known()&&otp::display_offset_minutes()==0);
+    otp::format_display_time(1234567890,true,text,sizeof text);assert(!strcmp(text,"23:31:30 UTC"));
+    otp::format_display_time(1234567890,false,text,sizeof text);assert(!strcmp(text,"--:--:--"));
+    for(auto minutes:{-720,840,345,480}) {assert(otp::set_display_offset(minutes));otp::clock_begin();assert(otp::display_offset_known()&&otp::display_offset_minutes()==minutes);}
+    otp::format_display_time(1234567890,true,text,sizeof text);assert(!strcmp(text,"07:31:30"));
+    assert(!otp::set_display_offset(-721)&&!otp::set_display_offset(841));
+    commit_fail=true;assert(!otp::set_display_offset(60));assert(otp::display_offset_minutes()==480);commit_fail=false;
+    stored_offset=999999;otp::clock_begin();assert(!otp::display_offset_known()&&otp::display_offset_minutes()==0);
+    assert(otp::set_display_offset(-210));otp::format_zone(-210,text,sizeof text);assert(!strcmp(text,"UTC-03:30"));
+    otp::Vault v;assert(v.begin());assert(v.create_pattern("1236"));bool authorized=false;otp::Ui ui(v,authorized);otp::Protocol p(v,ui,authorized);assert(p.begin());
+    usb_connected=true;p.tick();authorized=true;
+    for(auto offset:{"-721","841","1.5","true","null"}) {
+        assert(!ok(rpc(p,"time_set",std::string("{\"epoch\":1234567890,\"utcOffsetMinutes\":")+offset+"}")));assert(!confirm_action);
+    }
+    assert(!rpc(p,"time_set","{\"epoch\":1234567890,\"utcOffsetMinutes\":480}"));
+    assert(confirmation_text.find("2009-02-14\n07:31:30\nUTC+08:00")!=std::string::npos);
+    confirm(false);assert(otp::display_offset_minutes()==-210);
+    assert(!rpc(p,"time_set","{\"epoch\":1234567890,\"utcOffsetMinutes\":480}"));
+    clock_us+=20000000;confirm(true);assert(applied_time==1234567910&&otp::display_offset_minutes()==480);
+    auto* status=rpc(p,"status");auto* result=cJSON_GetObjectItem(status,"result");assert(cJSON_GetObjectItem(result,"utcOffsetMinutes")->valueint==480);cJSON_Delete(status);
+    assert(!rpc(p,"time_set","{\"epoch\":1234567890}"));confirm(true);assert(otp::display_offset_minutes()==480);
+    otp::clock_begin();assert(otp::display_offset_minutes()==480);
+    puts("PASS: persisted display timezone, midnight rollover, offset bounds, consent, old clients and unchanged UTC timestamp");
+}
 #ifndef STOPWATCH_UI_TESTS
-int main(){setvbuf(stdout,nullptr,_IONBF,0);gestures();vectors();crypto_interop();encryption();power_cuts();retries();migration();protocol_tests();batch_import_tests();batch_import_power_cuts();migration_usb();puts("ALL NATIVE TESTS PASSED");}
+int main(){setvbuf(stdout,nullptr,_IONBF,0);gestures();vectors();crypto_interop();encryption();power_cuts();retries();migration();protocol_tests();batch_import_tests();batch_import_power_cuts();migration_usb();display_clock_tests();puts("ALL NATIVE TESTS PASSED");}
 #endif

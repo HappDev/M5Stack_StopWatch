@@ -93,7 +93,7 @@ bool totp(const Record& r, uint64_t timestamp, char out[9]) {
     for(int i=static_cast<int>(width)-1;i>=0;--i) {out[i]='0'+binary%10;binary/=10;}
     wipe(hash, sizeof hash); wipe(message, sizeof message); return true;
 }
-bool derive_key(const char* credential, const uint8_t salt[16], uint8_t key[32]) {
+bool derive_key(const char* credential, const uint8_t salt[16], uint8_t key[32], const KdfService& service) {
     // PBKDF2-HMAC-SHA256, one 32-byte output block. Cache the SHA states after
     // the HMAC ipad/opad blocks instead of hashing those same blocks 600000
     // times. The iteration count and derived key are identical to PKCS5.
@@ -128,6 +128,7 @@ bool derive_key(const char* credential, const uint8_t salt[16], uint8_t key[32])
         }
         if (!ret) ret = mbedtls_sha256_finish(&work, u);
         if (!ret) for (size_t j = 0; j < sizeof u; ++j) key[j] ^= u[j];
+        if (service && (i & 2047u) == 2047u) service();
     }
     mbedtls_sha256_free(&work); mbedtls_sha256_free(&outer); mbedtls_sha256_free(&inner);
     wipe(u, sizeof u);

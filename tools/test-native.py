@@ -62,6 +62,7 @@ def main():
             ui_objects = [str(ROOT / 'firmware/main/ui.cpp'), str(library)]
         cmd = [args.zig, 'c++', *flags, '-UNDEBUG', '-std=c++17', str(ROOT / 'firmware/main/crypto.cpp'),
                str(ROOT / 'firmware/main/pattern.cpp'),
+               str(ROOT / 'firmware/main/clock.cpp'),
                str(ROOT / 'firmware/main/vault.cpp'), str(ROOT / 'firmware/main/protocol.cpp'),
                str(ROOT / ('tests/native/ui_main.cpp' if args.ui else 'tests/native/main.cpp')),
                *ui_objects, *objects, '-o', str(out)]

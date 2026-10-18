@@ -1,6 +1,7 @@
 """Local USB client for StopWatch OTP v1. Never accepts secrets on the command line."""
 import argparse
 import base64
+import datetime
 import getpass
 import json
 from pathlib import Path
@@ -359,8 +360,10 @@ def main(argv=None):
                     print(f"{row.get('id')}  {row.get('issuer')} · {row.get('account')}  {row.get('algorithm')}/{row.get('digits')}/{row.get('period')}")
                 print(f'Аккаунтов: {len(rows)}; секреты не запрашивались.')
             elif args.command == 'time':
-                print('Подтвердите установку времени UTC на StopWatch.', flush=True)
-                device.request('time_set', {'epoch':int(time.time())})
+                print('Подтвердите время и часовой пояс компьютера на StopWatch.', flush=True)
+                timestamp = time.time()
+                offset = int(datetime.datetime.fromtimestamp(timestamp).astimezone().utcoffset().total_seconds() // 60)
+                device.request('time_set', {'epoch':int(timestamp), 'utcOffsetMinutes':offset})
                 print('Время установлено.')
             else:
                 current = device.list_records()
