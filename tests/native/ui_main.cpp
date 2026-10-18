@@ -2,6 +2,7 @@
 // real Ui and real LVGL instead of the confirmation-only UI stub.
 #define STOPWATCH_UI_TESTS
 #include "main.cpp"
+#include "board.h"
 #include <fstream>
 #include <cstdlib>
 
@@ -61,6 +62,7 @@ static void setup_lvgl() {
         lv_display_flush_ready(d);
     });
     pointer=lv_indev_create();lv_indev_set_type(pointer,LV_INDEV_TYPE_POINTER);
+    lv_timer_set_period(lv_indev_get_read_timer(pointer),board::TouchPollPeriodMs);
     lv_indev_set_mode(pointer,LV_INDEV_MODE_EVENT);
     lv_indev_set_read_cb(pointer,[](lv_indev_t*,lv_indev_data_t* data){data->point=position;data->state=pressed?LV_INDEV_STATE_PRESSED:LV_INDEV_STATE_RELEASED;});
 }
@@ -108,6 +110,61 @@ static void ui_wide_pattern_targets() {
     ui.lock();draw(ui,"7896");assert(v.ready());ui.lock();
     while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
     puts("PASS: real LVGL off-center pattern enrollment/unlock at all four touch-target boundaries");
+}
+static void ui_button_targets() {
+    fresh();otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb);ui.begin();
+    draw(ui,"1236");draw(ui,"1236");click_text(ui,"Настройки");
+    // Exercise text and padding with real hit testing, held presses and drift.
+    for(int col=0;col<3;++col)for(int row=0;row<3;++row) {
+        auto* text=find_text(usb?"Закрыть USB":"Разрешить USB");assert(text);
+        auto* button=lv_obj_get_parent(text);lv_obj_update_layout(lv_screen_active());
+        lv_area_t area;lv_obj_get_coords(button,&area);
+        int x=col==0?area.x1+10:col==1?(area.x1+area.x2)/2:area.x2-10;
+        int y=row==0?area.y1+8:row==1?(area.y1+area.y2)/2:area.y2-8;
+        lv_point_t point{x,y};assert(lv_indev_search_obj(lv_screen_active(),&point)==button);
+        bool was_usb=usb;
+        sample(ui,x,y,true);
+        for(int i=0;i<6;++i) {sample(ui,x+(i%2?3:0),y+(i%2?3:0),true);lv_timer_handler();}
+        sample(ui,x,y,false);assert(usb!=was_usb);
+    }
+    // Model the board's timer-driven input instead of injecting every sample.
+    // A complete 20 ms tap can fall between the default 33 ms polls.
+    auto* timer=lv_indev_get_read_timer(pointer);
+    lv_indev_set_mode(pointer,LV_INDEV_MODE_TIMER);
+    for(bool original:{true,false})for(unsigned duration:{20u,80u,600u}) {
+        unsigned period=original?33u:board::TouchPollPeriodMs;
+        auto* text=find_text(usb?"Закрыть USB":"Разрешить USB");assert(text);
+        lv_obj_update_layout(lv_screen_active());lv_area_t area;lv_obj_get_coords(lv_obj_get_parent(text),&area);
+        position={(area.x1+area.x2)/2,(area.y1+area.y2)/2};pressed=false;
+        lv_timer_set_period(timer,period);lv_timer_reset(timer);
+        advance(period);lv_timer_handler();ui.tick();
+        bool was_usb=usb;pressed=true;
+        for(unsigned ms=0;ms<duration;ms+=10) {advance(10);lv_timer_handler();ui.tick();}
+        pressed=false;
+        for(unsigned ms=0;ms<100;ms+=10) {advance(10);lv_timer_handler();ui.tick();}
+        bool clicked=usb!=was_usb;
+        printf("Touch timer: %u ms poll, %u ms tap: %s\n",period,duration,clicked?"clicked":"missed");
+        assert(clicked==(!original || duration!=20));
+    }
+    lv_timer_set_period(timer,board::TouchPollPeriodMs);lv_indev_set_mode(pointer,LV_INDEV_MODE_EVENT);
+    // Even if a caption is made interactive, it must activate its parent once.
+    auto* usb_text=find_text(usb?"Закрыть USB":"Разрешить USB");assert(usb_text);
+    lv_obj_add_flag(usb_text,LV_OBJ_FLAG_CLICKABLE);
+    bool was_usb=usb;click_text(ui,was_usb?"Закрыть USB":"Разрешить USB");assert(usb!=was_usb);
+    // Reproduce the reported target specifically: hold on the word "Back".
+    for(bool caption_intercepts:{false,true}) {
+        auto* text=find_text("Назад");assert(text);auto* button=lv_obj_get_parent(text);
+        if(caption_intercepts)lv_obj_add_flag(text,LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_update_layout(lv_screen_active());lv_area_t area;lv_obj_get_coords(text,&area);
+        int x=(area.x1+area.x2)/2,y=(area.y1+area.y2)/2;
+        lv_point_t point{x,y};assert(lv_indev_search_obj(lv_screen_active(),&point)==(caption_intercepts?text:button));
+        sample(ui,x,y,true);assert(lv_obj_has_state(button,LV_STATE_PRESSED));
+        for(int i=0;i<30;++i) {sample(ui,x,y,true);lv_timer_handler();}
+        sample(ui,x,y,false);assert(find_text("Аккаунты")&&!find_text("Назад"));
+        click_text(ui,"Настройки");
+    }
+    ui.lock();while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
+    puts("PASS: text-button center/padding, timed taps, Back caption hold and interactive caption forwarding without duplicate actions");
 }
 static void ui_migration() {
     legacy_fixture();otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb);ui.begin();
@@ -161,7 +218,7 @@ static void ui_recovery_and_usb() {
     assert(v.upsert(record()));ui.refresh();assert(find_text("Разрешить USB"));screenshot("missing-time-usb");
     click_text(ui,"Разрешить USB");assert(usb&&find_text("Закрыть USB"));
     click_text(ui,"Закрыть USB");assert(!usb);
-    side_a=true;ui.tick();assert(find_text("Разрешить USB")&&find_text("Синхронизируйте время"));screenshot("code-missing-time-usb");
+    click_text(ui,"PrivateMail");assert(find_text("Разрешить USB")&&find_text("Синхронизируйте время"));screenshot("code-missing-time-usb");
     rtc_ok=true;ui.tick();assert(!find_text("Разрешить USB"));
     side_b=true;ui.tick();assert(!find_text("Разрешить USB"));
     click_text(ui,"Настройки");assert(find_text("Разрешить USB"));
@@ -266,7 +323,8 @@ static void ui_bluetooth() {
         sample(ui,(area.x1+area.x2)/2,(area.y1+area.y2)/2,false);
     };
     auto finish=[&]{for(int i=0;i<20;++i){advance(20);ui.tick();}};
-    tap_label("BLE Service 0");assert(keyboard.result()==otp::BleTx::Sending);screenshot("bluetooth-code-sending");
+    tap_label("BLE Service 0");assert(keyboard.result()!=otp::BleTx::Sending&&port.typed().empty());
+    tap_label(code);assert(keyboard.result()==otp::BleTx::Sending);screenshot("bluetooth-code-sending");
     tap_label(code);finish();assert(port.typed()==code);assert(find_text("Код отправлен"));
     screenshot("bluetooth-code-sent");
     size_t count=port.typed().size();ui.refresh();advance(1000);ui.tick();assert(port.typed().size()==count);
@@ -303,7 +361,8 @@ static void ui_bluetooth() {
     assert(!keyboard.active()&&!port.running&&!port.saved);screenshot("bluetooth-settings-off");
     advance(30000);ui.tick();assert(!lit&&sleep_calls>0);wake=true;ui.tick();plugged=true;
     click_text(ui,"Назад");click_text(ui,"Назад");
-    rtc_ok=false;ui.tick();tap_label("BLE Service 0");assert(find_text("Синхронизируйте время")&&port.typed().empty());
+    rtc_ok=false;ui.tick();sample(ui,300,130,true);sample(ui,300,130,false);
+    assert(find_text("Синхронизируйте время")&&port.typed().empty());
     screenshot("bluetooth-time-invalid");
     rtc_ok=true;ui.tick();side_b=true;ui.tick();
     click_text(ui,"Настройки");click_text(ui,"Bluetooth");click_text(ui,"Включить");port.connect();ui.tick();
@@ -314,4 +373,103 @@ static void ui_bluetooth() {
     ui.lock();while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
     puts("PASS: LVGL BLE list-open/repeat, yellow navigation, rollover, scroll, wake, offline, lock, pairing confirmation/timeout, forget and off");
 }
-int main(){setvbuf(stdout,nullptr,_IONBF,0);radio_entropy_test();setup_lvgl();ui_enrollment();ui_wide_pattern_targets();ui_migration();ui_session();ui_recovery_and_usb();ui_batch_import();ui_spinner();ui_account_codes();ui_bluetooth();puts("ALL LVGL UI TESTS PASSED");}
+static void ui_list_pages() {
+    fresh();otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb);ui.begin();
+    draw(ui,"1236");draw(ui,"1236");
+    std::array<otp::Record,otp::MaxRecords> rows{};
+    for(size_t i=0;i<rows.size();++i){rows[i]=record(i);snprintf(rows[i].issuer,sizeof rows[i].issuer,"Page %u",static_cast<unsigned>(i));}
+    auto panel=[&]{auto* name=find_text("Page 0");assert(name);return lv_obj_get_parent(lv_obj_get_parent(name));};
+    auto next=[&]{side_a=true;ui.tick();lv_obj_update_layout(lv_screen_active());};
+    auto row=[&](size_t index){char name[32];snprintf(name,sizeof name,"Page %u",static_cast<unsigned>(index));auto* label=find_text(name);assert(label);return lv_obj_get_parent(label);};
+    auto visible_page=[&](size_t first,size_t count){
+        lv_area_t viewport;lv_obj_get_coords(panel(),&viewport);
+        for(size_t i=first;i<std::min(count,first+4);++i){lv_area_t area;lv_obj_get_coords(row(i),&area);assert(area.y1>=viewport.y1&&area.y2<=viewport.y2);}
+    };
+    for(size_t count:{0u,1u,4u,5u,8u,10u,100u}) {
+        assert(v.replace(rows.data(),count));ui.refresh();
+        if(!count){next();assert(find_text("Добавьте аккаунт\nчерез сайт и USB"));continue;}
+        const size_t pages=(count+3)/4;
+        for(size_t page=0;page<pages;++page){
+            assert(lv_obj_get_scroll_y(panel())==static_cast<int>(page*268));visible_page(page*4,count);next();
+        }
+        assert(lv_obj_get_scroll_y(panel())==0&&find_text("Аккаунты"));
+    }
+    // A finger scroll selects the page containing its top row, then advances one page.
+    lv_obj_scroll_to_y(panel(),150,LV_ANIM_OFF);next();assert(lv_obj_get_scroll_y(panel())==268);
+    lv_obj_scroll_to_y(panel(),345,LV_ANIM_OFF);next();assert(lv_obj_get_scroll_y(panel())==536);
+    ui.refresh();assert(lv_obj_get_scroll_y(panel())==536);
+    click_text(ui,"Настройки");click_text(ui,"Назад");assert(lv_obj_get_scroll_y(panel())==536);
+    // Opening the first card on this page and moving to the next card must not reset the list.
+    sample(ui,90,130,true);sample(ui,90,130,false);assert(!find_text("Page 0")&&find_text("Page 8"));
+    next();assert(find_text("Page 9")&&!find_text("Page 8"));
+    click_text(ui,"Аккаунты");assert(lv_obj_get_scroll_y(panel())==536);
+    advance(30000);ui.tick();assert(!lit);side_a=true;ui.tick();assert(lit&&lv_obj_get_scroll_y(panel())==536);
+    rtc_ok=false;ui.tick();visible_page(8,100);screenshot("four-cards-usb");
+    auto* usb_button=lv_obj_get_parent(find_text("Разрешить USB"));lv_area_t usb_area,viewport;
+    lv_obj_get_coords(usb_button,&usb_area);lv_obj_get_coords(panel(),&viewport);assert(usb_area.y1>viewport.y2);
+    click_text(ui,"Разрешить USB");assert(usb&&lv_obj_get_scroll_y(panel())==536);
+    rtc_ok=true;ui.tick();assert(lv_obj_get_scroll_y(panel())==536);
+    // A smaller vault clamps a remembered position to its last page.
+    assert(v.replace(rows.data(),5));ui.refresh();assert(lv_obj_get_scroll_y(panel())==268);visible_page(4,5);
+    ui.lock();draw(ui,"1236");assert(lv_obj_get_scroll_y(panel())==0);
+    // One account also wraps to itself in the full-card view.
+    assert(v.replace(rows.data(),1));ui.refresh();sample(ui,90,130,true);sample(ui,90,130,false);
+    next();assert(find_text("Page 0")&&!find_text("Настройки"));
+    ui.lock();while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
+    puts("PASS: four-card pages for 0/1/4/5/8/10/100 accounts, final-page alignment, swipe position, return, refresh, USB, wake, clamp and lock reset");
+}
+static void ui_card_halves() {
+    fresh();FakeBlePort port;port.saved=true;port.connect();otp::BleKeyboard keyboard(port);assert(keyboard.begin());
+    otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb,&keyboard);ui.begin();
+    draw(ui,"1236");draw(ui,"1236");
+    std::array<otp::Record,10> rows{};
+    for(size_t i=0;i<rows.size();++i){rows[i]=record(i);rows[i].secret[0]+=i;snprintf(rows[i].issuer,sizeof rows[i].issuer,"Split %u",static_cast<unsigned>(i));}
+    rows[1].digits=8;rows[1].period=60;rows[1].algorithm=otp::Algorithm::Sha256;
+    assert(v.replace(rows.data(),rows.size()));ui.refresh();
+    auto row=[&](size_t index){auto* name=find_text(rows[index].issuer);assert(name);return lv_obj_get_parent(name);};
+    auto panel=[&]{return lv_obj_get_parent(row(0));};
+    auto tap=[&](int x,int y){sample(ui,x,y,true);sample(ui,x,y,false);};
+    auto finish=[&]{for(int i=0;i<25;++i){advance(20);ui.tick();}};
+    auto list=[&]{side_b=true;ui.tick();assert(find_text("Split 0"));};
+    // Text, padding and the pixel immediately left of the center all open without sending.
+    for(int x:{8,80,156})for(int y:{8,20,44,52}){
+        list();lv_area_t area;lv_obj_get_coords(row(0),&area);port.reports.clear();
+        tap(area.x1+x,area.y1+y);finish();assert(find_text("Split 0")&&!find_text("Split 1")&&port.typed().empty());
+    }
+    // The center pixel belongs to the right half, including blank padding around the code.
+    for(int x:{157,220,300})for(int y:{8,25,50}){
+        list();lv_area_t area;lv_obj_get_coords(row(0),&area);port.reports.clear();char expected[9];assert(otp::totp(rows[0],board_epoch,expected));
+        tap(area.x1+x,area.y1+y);assert(keyboard.result()==otp::BleTx::Sending&&find_text("Отправка…")&&find_text("Split 1"));
+        tap(area.x1+x,area.y1+y);finish();assert(port.typed()==expected&&find_text("Код отправлен"));
+    }
+    advance(3000);ui.tick();assert(find_text("Аккаунты"));
+    // An interactive code caption bubbles exactly once to its row.
+    auto* caption=lv_obj_get_child(row(1),2);lv_obj_add_flag(caption,LV_OBJ_FLAG_CLICKABLE);
+    lv_area_t area;lv_obj_get_coords(caption,&area);port.reports.clear();char expected[9];assert(otp::totp(rows[1],board_epoch,expected));
+    tap((area.x1+area.x2)/2,(area.y1+area.y2)/2);finish();assert(port.typed()==expected&&strlen(expected)==8);
+    screenshot("list-code-sent");advance(3000);ui.tick();assert(find_text("Аккаунты"));
+    // Start a fresh transfer and measure the result's entire three-second lifetime.
+    tap((area.x1+area.x2)/2,(area.y1+area.y2)/2);
+    while(keyboard.result()==otp::BleTx::Sending){advance(20);ui.tick();}
+    assert(find_text("Код отправлен"));advance(2999);ui.tick();assert(find_text("Код отправлен"));
+    advance(1);ui.tick();assert(find_text("Аккаунты"));
+    // Sending from a later page uses that row's account and preserves the exact scroll offset.
+    side_a=true;ui.tick();int scroll=lv_obj_get_scroll_y(panel());assert(scroll==268);
+    lv_obj_get_coords(row(4),&area);port.reports.clear();board_epoch+=30;assert(otp::totp(rows[4],board_epoch,expected));
+    tap(area.x1+220,area.y1+25);ui.refresh();finish();assert(port.typed()==expected&&lv_obj_get_scroll_y(panel())==scroll);
+    // Offline actions are reported in the list and never replayed after reconnecting.
+    port.reports.clear();port.disconnect();ui.tick();tap(300,130);assert(find_text("Bluetooth не подключён")&&find_text("Split 0"));
+    port.connect();finish();assert(port.typed().empty());advance(3000);ui.tick();assert(find_text("Аккаунты"));
+    rtc_ok=false;ui.tick();tap(300,130);assert(find_text("Синхронизируйте время")&&port.typed().empty());
+    rtc_ok=true;ui.tick();finish();assert(port.typed().empty());advance(3000);ui.tick();
+    // Full-card navigation wraps from the last account to the first without sending.
+    side_a=true;ui.tick();tap(90,197);assert(find_text("Split 9")&&!find_text("Split 0"));
+    side_a=true;ui.tick();finish();assert(find_text("Split 0")&&!find_text("Split 9")&&port.typed().empty());
+    list();
+    // A drag beginning on the right side does not send or open; the first wake tap only wakes.
+    sample(ui,300,285,true);sample(ui,300,145,true);sample(ui,300,120,false);finish();assert(port.typed().empty()&&find_text("Split 0"));
+    advance(30000);ui.tick();assert(!lit);tap(300,130);finish();assert(lit&&port.typed().empty()&&find_text("Split 0"));
+    ui.lock();while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
+    puts("PASS: card halves, center boundary, captions and padding, 6/8 digits, duplicate suppression, feedback, page retention, rollover, offline, RTC, swipe and wake");
+}
+int main(){setvbuf(stdout,nullptr,_IONBF,0);radio_entropy_test();setup_lvgl();ui_enrollment();ui_wide_pattern_targets();ui_button_targets();ui_migration();ui_session();ui_recovery_and_usb();ui_batch_import();ui_spinner();ui_account_codes();ui_bluetooth();ui_list_pages();ui_card_halves();puts("ALL LVGL UI TESTS PASSED");}

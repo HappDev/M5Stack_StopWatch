@@ -14,6 +14,10 @@ extern const lv_font_t font_ru;
 
 namespace otp {
 static constexpr int64_t UnlockDurationUs = 12LL * 60 * 60 * 1000000;
+static constexpr int ListPageSize = 4, ListRowHeight = 59, ListRowGap = 8;
+static constexpr int ListRowPitch = ListRowHeight + ListRowGap;
+static constexpr int ListPageHeight = ListPageSize * ListRowPitch;
+static constexpr int ListViewportHeight = ListPageHeight - ListRowGap;
 static uint32_t millis() { return esp_timer_get_time() / 1000; }
 void Ui::click(lv_event_t* e) {
     auto* f = static_cast<std::function<void()>*>(lv_event_get_user_data(e));
@@ -30,6 +34,10 @@ lv_obj_t* Ui::button(const char* text, int x, int y, int w, int h, std::function
     auto* o = lv_button_create(lv_screen_active()); lv_obj_set_pos(o,x,y); lv_obj_set_size(o,w,h);
     lv_obj_set_style_bg_color(o,lv_color_hex(0x173c39),0); lv_obj_set_style_radius(o,14,0);
     auto* l = lv_label_create(o); lv_label_set_text(l,text); lv_obj_set_style_text_font(l,&font_ru,0); lv_obj_center(l);
+    // Captions belong to the button's touch target. If a caption ever receives
+    // input, forward press/release/click so it cannot become a dead area.
+    for(auto flag:{LV_OBJ_FLAG_CLICKABLE,LV_OBJ_FLAG_SCROLLABLE,LV_OBJ_FLAG_CLICK_FOCUSABLE})lv_obj_remove_flag(l,flag);
+    lv_obj_add_flag(l,LV_OBJ_FLAG_EVENT_BUBBLE);
     auto* callback = new std::function<void()>([this, action=std::move(action)] { if (touch()) action(); });
     lv_obj_add_event_cb(o,click,LV_EVENT_CLICKED,callback); lv_obj_add_event_cb(o,deleted,LV_EVENT_DELETE,callback);
     return o;
@@ -126,6 +134,7 @@ void Ui::lock(bool dark) {
     if(busy_) return;
     if(ble_) {ble_->cancel();ble_->cancel_pairing();}
     wipe(sending_code_,sizeof sending_code_);show_tx_=false;send_feedback_.clear();
+    list_panel_=nullptr;list_scroll_=0;
     cancel(); usb_ = false;
     if(on_lock_) on_lock_();
     if(!text_.empty()) wipe(text_.data(),text_.size());
@@ -227,29 +236,38 @@ void Ui::submit_pattern() {
     if (ok && vault_.ready()) { view_=View::List; render(); }
     else { lock(); if (info_label_) lv_label_set_text(info_label_,vault_.error()); }
 }
-void Ui::select(size_t index, bool send) {
+void Ui::select(size_t index) {
     if(index>=vault_.count() || !vault_.ready() || dark_ || session_expired()) return;
     if(ble_) {ble_->cancel();ble_->cancel_pairing();}
     wipe(sending_code_,sizeof sending_code_);show_tx_=false;send_feedback_.clear();
     selected_ = index; view_ = View::Code; render();
-    if(send) send_code();
 }
-void Ui::send_code() {
-    if(!ble_ || !vault_.ready() || dark_ || busy_ || session_expired() || view_!=View::Code || selected_>=vault_.count()) return;
-    if(ble_->result()==BleTx::Sending) return;
-    show_tx_=true;send_feedback_.clear();
+void Ui::send_code(size_t index) {
+    if(!vault_.ready() || dark_ || busy_ || session_expired() ||
+       (view_!=View::Code && view_!=View::List) || index>=vault_.count()) return;
+    if(ble_ && ble_->result()==BleTx::Sending) return;
+    show_tx_=true;send_feedback_.clear();send_feedback_started_=millis();
     char code[9]{};
     if(!board::rtc_valid()) {
-        show_tx_=false; // The existing countdown label explains the RTC error.
-    } else if(!totp(vault_.record(selected_),board::now(),code)) {
+        send_feedback_="Синхронизируйте время";
+    } else if(!ble_) {
+        send_feedback_="Bluetooth недоступен";
+    } else if(!totp(vault_.record(index),board::now(),code)) {
         send_feedback_="Код недоступен";
     } else {
         if(ble_->send(code,esp_timer_get_time())) {
             memcpy(sending_code_,code,sizeof code);
-            if(code_label_) lv_label_set_text(code_label_,code);
+            if(view_==View::Code && code_label_) lv_label_set_text(code_label_,code);
         }
     }
     wipe(code,sizeof code);update_bluetooth();
+}
+void Ui::next_list_page() {
+    if(!list_panel_ || vault_.count()<=ListPageSize) return;
+    const auto page=std::max<int32_t>(0,lv_obj_get_scroll_y(list_panel_))/ListPageHeight;
+    const auto pages=(vault_.count()+ListPageSize-1)/ListPageSize;
+    list_scroll_=static_cast<int32_t>((page+1)%pages)*ListPageHeight;
+    lv_obj_scroll_to_y(list_panel_,list_scroll_,LV_ANIM_OFF);
 }
 void Ui::bluetooth_action(int action) {
     if(!ble_ || !vault_.ready() || dark_ || session_expired()) return;
@@ -265,9 +283,12 @@ void Ui::bluetooth_action(int action) {
     render();
 }
 void Ui::update_bluetooth() {
-    if(!ble_ || !bluetooth_label_) return;
-    const char* text=ble_->status();
-    if(view_==View::Code && show_tx_) text=send_feedback_.empty()?ble_->tx_status():send_feedback_.c_str();
+    if(!bluetooth_label_) return;
+    if(view_==View::List && show_tx_ && !(ble_ && ble_->result()==BleTx::Sending) &&
+       millis()-send_feedback_started_>=3000) {show_tx_=false;send_feedback_.clear();}
+    const char* text=view_==View::List?"Аккаунты":ble_?ble_->status():"Bluetooth недоступен";
+    if((view_==View::Code || view_==View::List) && show_tx_)
+        text=send_feedback_.empty()?(ble_?ble_->tx_status():"Bluetooth недоступен"):send_feedback_.c_str();
     lv_label_set_text(bluetooth_label_,text);
 }
 void Ui::settings_action(int action) {
@@ -289,6 +310,8 @@ void Ui::settings_action(int action) {
     });
 }
 void Ui::render() {
+    if(list_panel_) list_scroll_=std::max<int32_t>(0,lv_obj_get_scroll_y(list_panel_));
+    list_panel_=nullptr;
     if ((view_==View::List || view_==View::Code || view_==View::Settings || view_==View::Bluetooth || view_==View::Pairing) && !vault_.ready()) view_=auth_view();
     retry_visible_=false;
     pattern_panel_=pattern_line_=nullptr; std::fill(std::begin(pattern_dots_),std::end(pattern_dots_),nullptr);
@@ -347,13 +370,20 @@ void Ui::render() {
         button("Назад",153,340,160,48,[this]{view_=auth_view();render();});
     } else if (view_ == View::List) {
         const bool needs_usb=!rendered_time_valid_ || !vault_.count();
-        label("Аккаунты",100,65,266);
-        auto panel = lv_obj_create(screen); lv_obj_set_pos(panel,68,105); lv_obj_set_size(panel,330,needs_usb?184:260);
+        bluetooth_label_=label("Аккаунты",60,65,346);
+        lv_obj_set_height(bluetooth_label_,28);lv_label_set_long_mode(bluetooth_label_,LV_LABEL_LONG_DOT);
+        auto panel = lv_obj_create(screen);list_panel_=panel;
+        lv_obj_set_pos(panel,68,105); lv_obj_set_size(panel,330,ListViewportHeight);
         lv_obj_set_style_bg_opa(panel,LV_OPA_TRANSP,0); lv_obj_set_style_border_width(panel,0,0);
         lv_obj_set_style_pad_all(panel,0,0); lv_obj_set_scroll_dir(panel,LV_DIR_VER);
         for (size_t i = 0; i < vault_.count(); ++i) {
             const auto& r = vault_.record(i);
-            auto b = button("",0,static_cast<int>(i*72),314,64,[this,i]{select(i,true);});
+            auto b = button("",0,static_cast<int>(i*ListRowPitch),314,ListRowHeight,[this,i]{
+                auto* indev=lv_indev_active();if(!indev || !list_codes_[i])return;
+                lv_point_t point;lv_indev_get_point(indev,&point);
+                auto* row=lv_obj_get_parent(list_codes_[i]);lv_area_t area;lv_obj_get_coords(row,&area);
+                if(point.x-area.x1<lv_obj_get_width(row)/2)select(i);else send_code(i);
+            });
             lv_obj_set_parent(b,panel);
             lv_obj_set_style_pad_all(b,0,0);
             auto* name=lv_obj_get_child(b,0);lv_obj_set_align(name,LV_ALIGN_TOP_LEFT);lv_obj_set_pos(name,8,8);lv_obj_set_size(name,144,24);
@@ -365,10 +395,22 @@ void Ui::render() {
             auto* code=lv_label_create(b);lv_obj_set_pos(code,162,16);lv_obj_set_width(code,144);
             lv_obj_set_style_text_font(code,&lv_font_montserrat_28,0);lv_obj_set_style_text_align(code,LV_TEXT_ALIGN_RIGHT,0);
             list_codes_[i]=code;
-            for(auto* child:{name,account,code})lv_obj_remove_flag(child,LV_OBJ_FLAG_CLICKABLE);
+            for(auto* child:{name,account,code}) {
+                for(auto flag:{LV_OBJ_FLAG_CLICKABLE,LV_OBJ_FLAG_SCROLLABLE,LV_OBJ_FLAG_CLICK_FOCUSABLE})lv_obj_remove_flag(child,flag);
+                lv_obj_add_flag(child,LV_OBJ_FLAG_EVENT_BUBBLE);
+            }
         }
+        if(vault_.count()) {
+            // Reserve complete pages so the final partial page can start at the top.
+            const int pages=(vault_.count()+ListPageSize-1)/ListPageSize;
+            auto* end=lv_obj_create(panel);lv_obj_remove_style_all(end);
+            lv_obj_set_pos(end,0,pages*ListPageHeight-ListRowGap-1);lv_obj_set_size(end,1,1);
+            lv_obj_remove_flag(end,LV_OBJ_FLAG_CLICKABLE);lv_obj_remove_flag(end,LV_OBJ_FLAG_SCROLLABLE);
+            list_scroll_=std::min<int32_t>(list_scroll_,(pages-1)*ListPageHeight);
+        } else list_scroll_=0;
+        lv_obj_update_layout(panel);lv_obj_scroll_to_y(panel,list_scroll_,LV_ANIM_OFF);
         if (!vault_.count()) label("Добавьте аккаунт\nчерез сайт и USB",85,175,296);
-        if (needs_usb) button(usb_ ? "Закрыть USB" : "Разрешить USB",98,304,270,48,[this]{settings_action(0);});
+        if (needs_usb) button(usb_ ? "Закрыть USB" : "Разрешить USB",98,374,270,44,[this]{settings_action(0);});
         icon_button(true,10,[this]{view_=View::Settings;render();});
         icon_button(false,408,[this]{lock();});
     } else if (view_ == View::Code) {
@@ -379,7 +421,7 @@ void Ui::render() {
         code_label_ = label("",45,185,376,&lv_font_montserrat_48);
         if(ble_) {
             lv_obj_add_flag(code_label_,LV_OBJ_FLAG_CLICKABLE);
-            auto* callback=new std::function<void()>([this]{if(touch())send_code();});
+            auto* callback=new std::function<void()>([this]{if(touch())send_code(selected_);});
             lv_obj_add_event_cb(code_label_,click,LV_EVENT_CLICKED,callback);
             lv_obj_add_event_cb(code_label_,deleted,LV_EVENT_DELETE,callback);
             bluetooth_label_=label("",60,rendered_time_valid_?305:277,346);
@@ -438,12 +480,16 @@ void Ui::tick() {
         if(!board::rtc_valid()) ble_->cancel();
         ble_->tick(esp_timer_get_time(),vault_.ready()&&!dark_);
         if(ble_->result()!=BleTx::Sending) wipe(sending_code_,sizeof sending_code_);
-        if(rendered_tx_!=ble_->result()) {rendered_tx_=ble_->result();if(view_==View::Code)update_codes();}
+        if(rendered_tx_!=ble_->result()) {
+            rendered_tx_=ble_->result();
+            if(rendered_tx_!=BleTx::Sending)send_feedback_started_=millis();
+            if(view_==View::Code)update_codes();
+        }
         if(view_==View::Pairing && !ble_->pairing()) {view_=View::Bluetooth;last_activity_=millis();render();}
         else if(view_==View::Pairing && (rendered_comparison_!=ble_->comparison() || rendered_number_!=ble_->number())) render();
         else if(view_==View::Bluetooth && rendered_bonded_!=ble_->bonded()) render();
-        update_bluetooth();
     }
+    update_bluetooth();
     if(board::wake_touch()) touch();
     bool a = board::button_a(), b = board::button_b(), held = board::button_b_held();
     if (a || b || held) {
@@ -458,7 +504,10 @@ void Ui::tick() {
             else if (vault_.ready() && !pending_) {
                 if (view_==View::Pattern) { if (b) cancel_pattern(); }
                 else {
-                    if (a && vault_.count()) select((selected_ + 1) % vault_.count());
+                    if (a && vault_.count()) {
+                        if(view_==View::List)next_list_page();
+                        else select((selected_ + 1) % vault_.count());
+                    }
                     if (b) { if(ble_){ble_->cancel();ble_->cancel_pairing();} view_ = View::List; render(); }
                 }
             }

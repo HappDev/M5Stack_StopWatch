@@ -3,6 +3,7 @@
 #include <ctime>
 #include <lvgl.h>
 namespace board {
+constexpr uint32_t TouchPollPeriodMs = 10;
 bool begin();
 void tick();
 bool rtc_valid();

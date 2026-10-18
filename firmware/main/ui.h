@@ -33,8 +33,9 @@ private:
     void draw_pattern();
     static void pattern_event(lv_event_t* event);
     void settings_action(int action);
-    void select(size_t index, bool send = false);
-    void send_code();
+    void select(size_t index);
+    void send_code(size_t index);
+    void next_list_page();
     void bluetooth_action(int action);
     void update_bluetooth();
     bool touch();
@@ -54,6 +55,7 @@ private:
     bool show_tx_ = false, rendered_comparison_ = false, rendered_bonded_ = false;
     BleTx rendered_tx_ = BleTx::Idle;
     uint32_t rendered_number_ = 0;
+    uint32_t send_feedback_started_ = 0;
     View view_ = View::Pin;
     bool dark_ = false, pattern_change_ = false, pattern_second_ = false;
     bool busy_ = false, pattern_submit_ = false, pin_submit_ = false, saving_ = false;
@@ -66,6 +68,8 @@ private:
     lv_obj_t* pattern_line_ = nullptr;
     lv_point_precise_t pattern_path_[6]{};
     size_t pin_len_ = 0, selected_ = 0;
+    lv_obj_t* list_panel_ = nullptr;
+    int32_t list_scroll_ = 0;
     uint32_t last_activity_ = 0, last_second_ = 0;
     uint32_t busy_frame_ = 0;
     int64_t unlocked_at_ = 0;

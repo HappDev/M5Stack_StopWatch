@@ -155,6 +155,8 @@ bool begin() {
     if (!d || !buf) return false;
     lv_display_set_buffers(d, buf, nullptr, size, LV_DISPLAY_RENDER_MODE_PARTIAL); lv_display_set_flush_cb(d, flush);
     auto input = lv_indev_create(); lv_indev_set_type(input, LV_INDEV_TYPE_POINTER); lv_indev_set_read_cb(input, touch_read);
+    // Poll independently of the 33 ms render period so short taps are sampled.
+    lv_timer_set_period(lv_indev_get_read_timer(input), TouchPollPeriodMs);
     tick(); return true;
 }
 void tick() {
