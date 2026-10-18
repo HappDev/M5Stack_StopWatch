@@ -28,6 +28,12 @@ static const uint16_t hid_uuid=ESP_GATT_UUID_HID_SVC, info_uuid=ESP_GATT_UUID_HI
     control_uuid=ESP_GATT_UUID_HID_CONTROL_POINT, protocol_uuid=ESP_GATT_UUID_HID_PROTO_MODE,
     map_uuid=ESP_GATT_UUID_HID_REPORT_MAP, report_uuid=ESP_GATT_UUID_HID_REPORT,
     boot_uuid=ESP_GATT_UUID_HID_BT_KB_INPUT, boot_output_uuid=ESP_GATT_UUID_HID_BT_KB_OUTPUT;
+// GAP's advertising API requires complete 128-bit UUIDs, even for an assigned
+// 16-bit service. Bluetooth Base UUID + HID (0x1812), in little-endian order.
+static const uint8_t hid_adv_uuid[]={
+    0xfb,0x34,0x9b,0x5f,0x80,0x00,0x00,0x80,0x00,0x10,0x00,0x00,
+    static_cast<uint8_t>(hid_uuid),static_cast<uint8_t>(hid_uuid>>8),0x00,0x00
+};
 static const uint8_t read_property=ESP_GATT_CHAR_PROP_BIT_READ,
     write_property=ESP_GATT_CHAR_PROP_BIT_WRITE_NR,
     rw_property=ESP_GATT_CHAR_PROP_BIT_READ|ESP_GATT_CHAR_PROP_BIT_WRITE_NR,
@@ -358,7 +364,7 @@ void EspBlePort::gatt(esp_gatts_cb_event_t event,esp_gatt_if_t iface,esp_ble_gat
             interface_=iface;
             esp_ble_adv_data_t adv{}; adv.include_name=true;
             adv.appearance=ESP_HID_APPEARANCE_KEYBOARD;
-            adv.service_uuid_len=2; adv.p_service_uuid=reinterpret_cast<uint8_t*>(const_cast<uint16_t*>(&hid_uuid));
+            adv.service_uuid_len=sizeof hid_adv_uuid; adv.p_service_uuid=const_cast<uint8_t*>(hid_adv_uuid);
             adv.flag=ESP_BLE_ADV_FLAG_GEN_DISC|ESP_BLE_ADV_FLAG_BREDR_NOT_SPT;
             if(esp_ble_gap_config_adv_data(&adv)!=ESP_OK || esp_ble_gatts_create_attr_tab(battery_service,iface,4,0)!=ESP_OK) state_.fault=true;
             break;
