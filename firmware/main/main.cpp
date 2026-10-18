@@ -15,6 +15,6 @@ extern "C" void app_main() {
     const bool usb_ok=protocol.begin();
     if(!usb_ok) ui.message("Ошибка USB. Перезапустите устройство.");
     while(true) {
-        board::tick(); if(usb_ok) protocol.tick(); lv_timer_handler(); ui.tick(); vTaskDelay(pdMS_TO_TICKS(10));
+        board::tick(); lv_timer_handler(); ui.tick(); if(usb_ok) protocol.tick(); vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

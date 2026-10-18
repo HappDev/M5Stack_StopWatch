@@ -196,7 +196,8 @@ uint16_t battery_mv() { return battery; }
 bool usb_power() { return external; }
 void screen(bool on) { screen_on=on;display.brightness(on ? 120 : 0); }
 void sleep() {
-    // Only called while locked and unplugged. Timer bounds sleep to recheck power/RTC.
+    // Called while the screen is off and unplugged. Light sleep preserves the
+    // unlocked session in RAM; timer wake rechecks power, RTC and its deadline.
     for (auto pin : {GPIO_NUM_1,GPIO_NUM_2,GPIO_NUM_13}) gpio_wakeup_enable(pin, GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup(); esp_sleep_enable_timer_wakeup(2000000);
     esp_light_sleep_start();

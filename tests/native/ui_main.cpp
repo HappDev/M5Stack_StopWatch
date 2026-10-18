@@ -36,7 +36,7 @@ static void click_text(otp::Ui& ui,const char* text) {
     int x=(area.x1+area.x2)/2,y=(area.y1+area.y2)/2;sample(ui,x,y,true);sample(ui,x,y,false);
 }
 static void draw(otp::Ui& ui,const char* points,bool release=true) {
-    for(const char* p=points;*p;++p) sample(ui,103+otp::PatternGesture::center_x(*p-'0'),104+otp::PatternGesture::center_y(*p-'0'),true);
+    for(const char* p=points;*p;++p) sample(ui,63+otp::PatternGesture::center_x(*p-'0'),88+otp::PatternGesture::center_y(*p-'0'),true);
     if(release)sample(ui,position.x,position.y,false);
 }
 static void screenshot(const char* name) {
@@ -69,7 +69,7 @@ static void ui_enrollment() {
     draw(ui,"1236");draw(ui,"1236");assert(v.ready()&&find_text("Аккаунты"));
     assert(v.upsert(record()));ui.refresh();
     click_text(ui,"Настройки");click_text(ui,"Сменить ключ");
-    draw(ui,"1258");click_text(ui,"Отмена");assert(v.ready()&&find_text("Аккаунты"));
+    draw(ui,"1258");side_b=true;ui.tick();assert(v.ready()&&find_text("Аккаунты"));
     ui.lock();draw(ui,"1236");click_text(ui,"Настройки");click_text(ui,"Сменить ключ");
     draw(ui,"1258");draw(ui,"1258");assert(v.ready());ui.lock();
     assert(!v.unlock_pattern("1236"));draw(ui,"1258");assert(v.ready());
@@ -85,7 +85,7 @@ static void ui_enrollment() {
     draw(ui,"1258");assert(v.status()==otp::VaultStatus::Locked&&counter==5);
     advance(31000);draw(ui,"1258");assert(v.ready()&&counter==0);
     // Release outside the input panel keeps the captured gesture intact.
-    ui.lock();draw(ui,"1258",false);sample(ui,233,380,true);sample(ui,233,380,false);assert(v.ready());
+    ui.lock();draw(ui,"1258",false);sample(ui,233,425,true);sample(ui,233,425,false);assert(v.ready());
     // Physical side-button wake only turns on the screen, then requires a new gesture.
     ui.lock(true);assert(!lit);side_a=true;ui.tick();assert(lit&&v.status()==otp::VaultStatus::Locked);
     ui.lock(true);wake=true;ui.tick();assert(lit&&v.status()==otp::VaultStatus::Locked);
@@ -98,12 +98,59 @@ static void ui_migration() {
     assert(find_text("Прежний PIN"));
     auto enter_pin=[&]{for(char c:std::string("12345678")){char digit[]={c,0};click_text(ui,digit);}click_text(ui,"OK");};
     enter_pin();assert(v.status()==otp::VaultStatus::Unlocked&&!v.ready());assert(find_text("Создайте ключ"));
-    side_a=true;ui.tick();side_b=true;ui.tick();assert(!find_text("Аккаунты")&&!find_text("Настройки")&&!usb);
-    draw(ui,"1236");click_text(ui,"Отмена");assert(v.status()==otp::VaultStatus::Locked&&find_text("Прежний PIN"));
+    side_a=true;ui.tick();assert(!find_text("Аккаунты")&&!find_text("Настройки")&&!usb);
+    draw(ui,"1236");side_b=true;ui.tick();assert(v.status()==otp::VaultStatus::Locked&&find_text("Прежний PIN"));
     enter_pin();draw(ui,"1236");draw(ui,"1236");assert(v.ready()&&v.count()==1&&find_text("Аккаунты"));
     ui.lock();assert(find_text("Нарисуйте ключ")&&!find_text("Прежний PIN"));
     draw(ui,"1236");assert(v.ready()&&!strcmp(v.record(0).issuer,"PrivateMail"));ui.lock();
     while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
     puts("PASS: real LVGL legacy PIN migration, side-button bypass rejection, cancellation and account preservation");
 }
-int main(){setvbuf(stdout,nullptr,_IONBF,0);setup_lvgl();ui_enrollment();ui_migration();puts("ALL LVGL UI TESTS PASSED");}
+static void ui_session() {
+    fresh();otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb);ui.begin();
+    draw(ui,"1236");draw(ui,"1236");assert(v.ready());
+    const int64_t unlocked=clock_us;
+    click_text(ui,"Разрешить USB");assert(usb);
+    bool cancelled=false;assert(ui.ask("Test confirmation",[&](bool yes){assert(!yes);cancelled=true;}));
+    advance(30000);ui.tick();assert(!lit&&v.ready()&&!usb&&cancelled);
+    side_a=true;ui.tick();assert(lit&&v.ready()&&find_text("Аккаунты"));
+    advance(30000);ui.tick();assert(!lit&&v.ready());wake=true;ui.tick();assert(lit&&v.ready());
+    // Physical activity and RTC changes must not move the 12-hour deadline.
+    const int64_t deadline=unlocked+12LL*60*60*1000000;
+    advance(static_cast<unsigned>((deadline-clock_us)/1000)-1);side_b=true;ui.tick();assert(v.ready());
+    rtc_ok=false;advance(1);ui.tick();assert(!v.ready()&&!usb&&find_text("Нарисуйте ключ"));
+    draw(ui,"1236");assert(v.ready());
+    advance(30000);ui.tick();assert(!lit&&v.ready());
+    advance(12*60*60*1000);ui.tick();assert(!lit&&!v.ready());wake=true;ui.tick();assert(lit&&find_text("Нарисуйте ключ"));
+    draw(ui,"1236");side_held=true;ui.tick();assert(!v.ready());
+    // Restart never inherits the RAM-only session.
+    draw(ui,"1236");assert(v.ready());otp::Vault reboot;assert(reboot.begin()&&!reboot.ready());ui.lock();
+    // Deadline also survives the 32-bit millisecond counter wrapping.
+    clock_us=(static_cast<int64_t>(UINT32_MAX)-1000)*1000;
+    draw(ui,"1236");assert(v.ready());advance(2000);ui.tick();assert(v.ready());
+    advance(12*60*60*1000);ui.tick();assert(!v.ready());
+    while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
+    puts("PASS: 12-hour deadline, display sleep/wake, USB revocation, pending cancellation, manual lock, restart and timer wrap");
+}
+static void ui_recovery_and_usb() {
+    fresh();otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb);ui.begin();
+    draw(ui,"1236");draw(ui,"1236");assert(find_text("Разрешить USB"));screenshot("empty-usb");
+    rtc_ok=false;ui.tick();assert(find_text("Разрешить USB"));
+    assert(v.upsert(record()));ui.refresh();assert(find_text("Разрешить USB"));screenshot("missing-time-usb");
+    click_text(ui,"Разрешить USB");assert(usb&&find_text("Закрыть USB"));
+    click_text(ui,"Закрыть USB");assert(!usb);
+    side_a=true;ui.tick();assert(find_text("Разрешить USB")&&find_text("Синхронизируйте время"));screenshot("code-missing-time-usb");
+    rtc_ok=true;ui.tick();assert(!find_text("Разрешить USB"));
+    side_b=true;ui.tick();assert(!find_text("Разрешить USB"));
+    click_text(ui,"Настройки");assert(find_text("Разрешить USB"));
+    click_text(ui,"Разрешить USB");assert(usb);usb=false;ui.tick();assert(find_text("Разрешить USB"));
+    ui.lock();assert(!find_text("Сброс")&&!find_text("Сбросить всё"));
+    side_b=true;ui.tick();assert(find_text("Помощь")&&find_text("Сбросить всё"));screenshot("recovery");
+    click_text(ui,"Сбросить всё");click_text(ui,"Отмена");assert(v.count()==0&&!v.ready()&&find_text("Помощь"));
+    click_text(ui,"Назад");draw(ui,"1236");assert(v.ready()&&v.count()==1);
+    ui.lock();side_b=true;ui.tick();click_text(ui,"Сбросить всё");click_text(ui,"Разрешить");
+    assert(v.status()==otp::VaultStatus::Empty&&find_text("Создайте ключ"));
+    while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
+    puts("PASS: separate reset screen, cancellation preserves accounts, USB shortcuts for missing time/records and live state refresh");
+}
+int main(){setvbuf(stdout,nullptr,_IONBF,0);setup_lvgl();ui_enrollment();ui_migration();ui_session();ui_recovery_and_usb();puts("ALL LVGL UI TESTS PASSED");}

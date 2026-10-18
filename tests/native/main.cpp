@@ -24,6 +24,7 @@ static uint32_t counter=0,pending_counter=0;
 static int cut_after=-1;
 static bool usb_connected=false;
 static int64_t applied_time=0;
+static bool rtc_ok=true;
 static std::string usb_rx,usb_tx;
 static std::function<void(bool)> confirm_action;
 esp_err_t tinyusb_driver_install(const tinyusb_config_t*){return ESP_OK;}
@@ -32,7 +33,7 @@ bool tud_cdc_connected(){return usb_connected;}
 size_t tinyusb_cdcacm_write_queue(int,const uint8_t* p,size_t n){usb_tx.append(reinterpret_cast<const char*>(p),n);return n;}
 esp_err_t tinyusb_cdcacm_write_flush(int,int){return ESP_OK;}
 esp_err_t tinyusb_cdcacm_read(int,uint8_t* p,size_t cap,size_t* n){*n=std::min(cap,usb_rx.size());memcpy(p,usb_rx.data(),*n);usb_rx.erase(0,*n);return ESP_OK;}
-namespace board {bool rtc_valid(){return true;}int64_t now(){return 1234567890;}bool set_time(int64_t t){applied_time=t;return true;}uint16_t battery_mv(){return 3900;}}
+namespace board {bool rtc_valid(){return rtc_ok;}int64_t now(){return 1234567890;}bool set_time(int64_t t){applied_time=t;rtc_ok=true;return true;}uint16_t battery_mv(){return 3900;}}
 namespace otp {
 #ifndef STOPWATCH_UI_TESTS
 bool Ui::ask(const std::string&,std::function<void(bool)> action){if(confirm_action)return false;confirm_action=std::move(action);return true;}
@@ -41,7 +42,7 @@ void Ui::lock(bool){usb_=false;cancel();if(on_lock_)on_lock_();vault_.lock();}
 void Ui::refresh(){}
 #endif
 }
-static void fresh() {for(auto& p:flash)p.assign(0x80000,255);counter_exists=false;counter=0;clock_us=0;cut_after=-1;commit_fail=false;}
+static void fresh() {for(auto& p:flash)p.assign(0x80000,255);counter_exists=false;counter=0;clock_us=0;cut_after=-1;commit_fail=false;rtc_ok=true;}
 const esp_partition_t* esp_partition_find_first(int,int,const char* name){for(auto& p:partitions)if(!strcmp(p.label,name))return &p;return nullptr;}
 esp_err_t esp_partition_read(const esp_partition_t* p,size_t off,void* data,size_t n){if(off+n>p->size)return ESP_FAIL;memcpy(data,flash[p->slot].data()+off,n);return ESP_OK;}
 static bool cut(){if(cut_after<0)return false;if(cut_after==0)return true;--cut_after;return false;}
@@ -105,11 +106,13 @@ static void gestures() {
     for(auto invalid:{"","123","1234567","1123","0236","1a36","1356"})assert(!otp::valid_pattern(invalid));
     assert(!otp::valid_pattern(nullptr));assert(otp::valid_pattern("6541"));
     // Fast and slow paths hit exactly the same points, including grazed nodes.
-    g.start(40,40);g.move(220,40);g.move(220,130);assert(g.valid()&&!strcmp(g.points(),"1236"));
-    g.clear();assert(!g.active()&&!g.valid()&&!g.points()[0]);g.move(40,40);assert(!g.size());
-    g.start(40,40);for(int x=41;x<=220;++x)g.move(x,40);for(int y=41;y<=130;++y)g.move(220,y);
+    const int left=otp::PatternGesture::center_x(1),right=otp::PatternGesture::center_x(3);
+    const int top=otp::PatternGesture::center_y(1),middle=otp::PatternGesture::center_y(4),bottom=otp::PatternGesture::center_y(7);
+    g.start(left,top);g.move(right,top);g.move(right,middle);assert(g.valid()&&!strcmp(g.points(),"1236"));
+    g.clear();assert(!g.active()&&!g.valid()&&!g.points()[0]);g.move(left,top);assert(!g.size());
+    g.start(left,top);for(int x=left+1;x<=right;++x)g.move(x,top);for(int y=top+1;y<=middle;++y)g.move(right,y);
     assert(g.valid()&&!strcmp(g.points(),"1236"));
-    g.clear();g.start(40,40);g.move(40,220);g.move(220,220);g.move(220,40);assert(g.overflow()&&!g.valid());
+    g.clear();g.start(left,top);g.move(left,bottom);g.move(right,bottom);g.move(right,top);assert(g.overflow()&&!g.valid());
     g.clear();assert(!g.overflow());
     puts("PASS: gesture lengths, repeats, midpoints, fast/slow swipes, overflow, cancellation");
 }

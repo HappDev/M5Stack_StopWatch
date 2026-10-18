@@ -8,8 +8,12 @@
 extern const lv_font_t font_ru;
 
 namespace otp {
+static constexpr int64_t UnlockDurationUs = 12LL * 60 * 60 * 1000000;
 static uint32_t millis() { return esp_timer_get_time() / 1000; }
-void Ui::click(lv_event_t* e) { auto* f = static_cast<std::function<void()>*>(lv_event_get_user_data(e)); if (f) (*f)(); }
+void Ui::click(lv_event_t* e) {
+    auto* f = static_cast<std::function<void()>*>(lv_event_get_user_data(e));
+    if (f) { auto action=*f; action(); } // Rendering may delete the originating button.
+}
 void Ui::deleted(lv_event_t* e) { delete static_cast<std::function<void()>*>(lv_event_get_user_data(e)); }
 lv_obj_t* Ui::label(const char* text, int x, int y, int w, const lv_font_t* font) {
     auto* o = lv_label_create(lv_screen_active()); lv_obj_set_pos(o,x,y); lv_obj_set_width(o,w);
@@ -21,7 +25,7 @@ lv_obj_t* Ui::button(const char* text, int x, int y, int w, int h, std::function
     auto* o = lv_button_create(lv_screen_active()); lv_obj_set_pos(o,x,y); lv_obj_set_size(o,w,h);
     lv_obj_set_style_bg_color(o,lv_color_hex(0x173c39),0); lv_obj_set_style_radius(o,14,0);
     auto* l = lv_label_create(o); lv_label_set_text(l,text); lv_obj_set_style_text_font(l,&font_ru,0); lv_obj_center(l);
-    auto* callback = new std::function<void()>([this, action=std::move(action)] { touch(); action(); });
+    auto* callback = new std::function<void()>([this, action=std::move(action)] { if (touch()) action(); });
     lv_obj_add_event_cb(o,click,LV_EVENT_CLICKED,callback); lv_obj_add_event_cb(o,deleted,LV_EVENT_DELETE,callback);
     return o;
 }
@@ -33,7 +37,30 @@ void Ui::begin() {
 Ui::View Ui::auth_view() const {
     return vault_.credential_kind()==CredentialKind::LegacyPin && vault_.status()==VaultStatus::Locked ? View::Pin : View::Pattern;
 }
-void Ui::touch() { last_activity_ = millis(); if (dark_) { dark_ = false; board::screen(true); render(); } }
+bool Ui::session_expired() const {
+    return vault_.ready() && esp_timer_get_time() - unlocked_at_ >= UnlockDurationUs;
+}
+bool Ui::touch() {
+    const bool expired = session_expired(), was_dark = dark_;
+    if (expired) lock(dark_);
+    last_activity_ = millis();
+    if (dark_) { dark_ = false; board::screen(true); render(); }
+    return !expired && !was_dark;
+}
+void Ui::dim() {
+    if (!vault_.ready()) { lock(true); return; }
+    cancel(); usb_=false;
+    if (on_lock_) on_lock_();
+    if (view_==View::Confirm) view_=View::List;
+    if (view_==View::Pattern) cancel_pattern();
+    render(); lv_refr_now(nullptr); dark_=true; board::screen(false);
+}
+void Ui::recovery() {
+    wipe(pin_,sizeof pin_); pin_len_=0; wipe(first_,sizeof first_);
+    gesture_.clear(); wipe(pattern_path_,sizeof pattern_path_);
+    pattern_submit_=pattern_second_=pattern_change_=false;
+    view_=View::Recovery; render();
+}
 void Ui::message(const char* text) { text_ = text; view_ = View::Error; render(); }
 void Ui::cancel() {
     auto action = std::move(pending_); pending_ = {}; answer_ = -1;
@@ -44,7 +71,7 @@ void Ui::lock(bool dark) {
     if(on_lock_) on_lock_();
     if(!text_.empty()) wipe(text_.data(),text_.size());
     text_.clear();
-    vault_.lock(); wipe(pin_,sizeof pin_); wipe(first_,sizeof first_);
+    vault_.lock(); unlocked_at_=0; wipe(pin_,sizeof pin_); wipe(first_,sizeof first_);
     gesture_.clear(); wipe(pattern_path_,sizeof pattern_path_); pattern_submit_=false;
     pin_len_ = 0; pattern_change_ = pattern_second_ = false; view_ = auth_view(); render();
     if (dark) { lv_refr_now(nullptr); dark_ = true; board::screen(false); }
@@ -107,7 +134,7 @@ void Ui::pattern_event(lv_event_t* event) {
     lv_point_t point; lv_indev_get_point(indev,&point);
     lv_area_t area; lv_obj_get_coords(ui->pattern_panel_,&area);
     int x=point.x-area.x1,y=point.y-area.y1;
-    ui->touch();
+    if (!ui->touch()) return;
     if (code==LV_EVENT_PRESSED) ui->gesture_.start(x,y);
     else if (ui->gesture_.active()) ui->gesture_.move(x,y);
     ui->draw_pattern();
@@ -137,6 +164,7 @@ void Ui::submit_pattern() {
     lv_refr_now(nullptr);
     bool ok=create ? vault_.create_pattern(pattern) : enroll ? vault_.change_pattern(pattern) : vault_.unlock_pattern(pattern);
     wipe(pattern,sizeof pattern); wipe(first_,sizeof first_); pattern_second_=pattern_change_=false; busy_=false;
+    if (ok && vault_.ready()) unlocked_at_=esp_timer_get_time();
     touch();
     if (ok && vault_.ready()) { view_=View::List; render(); }
     else { lock(); if (info_label_) lv_label_set_text(info_label_,vault_.error()); }
@@ -152,7 +180,7 @@ void Ui::settings_action(int action) {
     if (action == 2) ask("Удалить ВСЕ аккаунты?\nНужна резервная копия.\nОтменить сброс нельзя.", [this](bool yes) {
         if (yes) { vault_.reset(); lock(); }
         else if (vault_.ready()) { view_ = View::Settings; render(); }
-        else lock();
+        else { recovery(); }
     });
 }
 void Ui::render() {
@@ -161,6 +189,7 @@ void Ui::render() {
     pattern_panel_=pattern_line_=nullptr; std::fill(std::begin(pattern_dots_),std::end(pattern_dots_),nullptr);
     pin_label_ = code_label_ = seconds_label_ = info_label_ = nullptr;
     auto screen = lv_screen_active(); lv_obj_clean(screen);
+    rendered_time_valid_=board::rtc_valid(); rendered_usb_=usb_;
     lv_obj_set_style_bg_color(screen,lv_color_hex(0x081615),0); lv_obj_remove_flag(screen,LV_OBJ_FLAG_SCROLLABLE);
     char status[64]; snprintf(status,sizeof status,"%u мВ  %s",board::battery_mv(),usb_ ? "USB открыт" : "OTP");
     label(status,110,23,246);
@@ -177,11 +206,11 @@ void Ui::render() {
         button("<",113,274,74,42,[this]{pin_key(10);}); button("0",196,274,74,42,[this]{pin_key(0);});
         button("OK",279,274,74,42,[this]{submit_pin();});
         info_label_ = label("8–12 цифр",85,329,296);
-        button("Сброс",168,377,130,38,[this]{settings_action(2);});
+        button("Помощь",168,377,130,38,[this]{recovery();});
     } else if (view_ == View::Pattern) {
         bool enroll=pattern_change_ || vault_.status()==VaultStatus::Empty || vault_.credential_kind()==CredentialKind::LegacyPin;
-        label(pattern_second_ ? "Повторите рисунок" : enroll ? "Создайте ключ" : "Нарисуйте ключ",75,62,316);
-        pattern_panel_=lv_obj_create(screen); lv_obj_set_pos(pattern_panel_,103,104); lv_obj_set_size(pattern_panel_,260,250);
+        label(pattern_second_ ? "Повторите рисунок" : enroll ? "Создайте ключ" : "Нарисуйте ключ",75,55,316);
+        pattern_panel_=lv_obj_create(screen); lv_obj_set_pos(pattern_panel_,63,88); lv_obj_set_size(pattern_panel_,340,320);
         lv_obj_set_style_pad_all(pattern_panel_,0,0); lv_obj_set_style_border_width(pattern_panel_,0,0);
         lv_obj_set_style_bg_opa(pattern_panel_,LV_OPA_TRANSP,0);
         lv_obj_remove_flag(pattern_panel_,LV_OBJ_FLAG_SCROLLABLE); lv_obj_add_flag(pattern_panel_,LV_OBJ_FLAG_PRESS_LOCK);
@@ -190,16 +219,21 @@ void Ui::render() {
         lv_obj_set_style_line_width(pattern_line_,5,0); lv_obj_set_style_line_rounded(pattern_line_,true,0);
         for (int p=1;p<=9;++p) {
             auto* dot=lv_obj_create(pattern_panel_); pattern_dots_[p-1]=dot;
-            lv_obj_set_size(dot,20,20); lv_obj_set_pos(dot,PatternGesture::center_x(p)-10,PatternGesture::center_y(p)-10);
+            lv_obj_set_size(dot,26,26); lv_obj_set_pos(dot,PatternGesture::center_x(p)-13,PatternGesture::center_y(p)-13);
             lv_obj_set_style_radius(dot,LV_RADIUS_CIRCLE,0); lv_obj_set_style_border_width(dot,0,0);
             lv_obj_remove_flag(dot,LV_OBJ_FLAG_CLICKABLE); lv_obj_remove_flag(dot,LV_OBJ_FLAG_SCROLLABLE);
         }
-        info_label_=label("Соедините 4–6 точек",70,357,326); draw_pattern();
-        if (enroll && vault_.status()!=VaultStatus::Empty) button("Отмена",168,395,130,38,[this]{cancel_pattern();});
-        else button("Сброс",168,395,130,38,[this]{gesture_.clear();wipe(first_,sizeof first_);pattern_second_=false;settings_action(2);});
+        info_label_=label("Соедините 4–6 точек",70,405,326); draw_pattern();
+        label(enroll && vault_.status()!=VaultStatus::Empty ? "Синяя: отмена" : "Синяя: меню",143,433,180);
+    } else if (view_ == View::Recovery) {
+        label("Помощь",90,80,286);
+        label("Забыли ключ?\nСброс удалит все аккаунты.\nДля восстановления\nнужна резервная копия.",70,135,326);
+        button("Сбросить всё",98,270,270,48,[this]{settings_action(2);});
+        button("Назад",153,340,160,48,[this]{view_=auth_view();render();});
     } else if (view_ == View::List) {
+        const bool needs_usb=!rendered_time_valid_ || !vault_.count();
         label("Аккаунты",100,65,266);
-        auto panel = lv_obj_create(screen); lv_obj_set_pos(panel,67,105); lv_obj_set_size(panel,332,248);
+        auto panel = lv_obj_create(screen); lv_obj_set_pos(panel,67,105); lv_obj_set_size(panel,332,needs_usb?184:248);
         lv_obj_set_style_bg_opa(panel,LV_OPA_TRANSP,0); lv_obj_set_style_border_width(panel,0,0);
         lv_obj_set_style_pad_all(panel,0,0); lv_obj_set_scroll_dir(panel,LV_DIR_VER);
         for (size_t i = 0; i < vault_.count(); ++i) {
@@ -210,6 +244,7 @@ void Ui::render() {
             lv_obj_set_height(l,48);
         }
         if (!vault_.count()) label("Добавьте аккаунт\nчерез сайт и USB",85,175,296);
+        if (needs_usb) button(usb_ ? "Закрыть USB" : "Разрешить USB",98,304,270,48,[this]{settings_action(0);});
         button("Настройки",101,370,160,45,[this]{view_=View::Settings;render();});
         button("Замок",273,370,92,45,[this]{lock();});
     } else if (view_ == View::Code) {
@@ -219,8 +254,9 @@ void Ui::render() {
         auto account=label(r.account,60,115,346);lv_obj_set_height(account,48);lv_label_set_long_mode(account,LV_LABEL_LONG_DOT);
         code_label_ = label("",45,185,376,&lv_font_montserrat_48);
         seconds_label_ = label("",75,265,316);
-        button("Аккаунты",143,350,180,50,[this]{view_=View::List;render();});
-        last_second_ = 0;
+        if (!rendered_time_valid_) button(usb_ ? "Закрыть USB" : "Разрешить USB",98,310,270,44,[this]{settings_action(0);});
+        button("Аккаунты",143,rendered_time_valid_?350:366,180,50,[this]{view_=View::List;render();});
+        last_second_ = UINT32_MAX;
     } else if (view_ == View::Settings) {
         label("Настройки",90,65,286);
         button(usb_ ? "Закрыть USB" : "Разрешить USB",98,115,270,48,[this]{settings_action(0);});
@@ -240,12 +276,18 @@ void Ui::render() {
     }
 }
 void Ui::tick() {
+    if (session_expired()) lock(dark_);
     if(board::wake_touch()) touch();
     bool a = board::button_a(), b = board::button_b(), held = board::button_b_held();
     if (a || b || held) {
         bool was_dark = dark_; touch();
         if (!was_dark) {
             if (held) lock();
+            else if (b && !pending_ && (view_==View::Pin || view_==View::Pattern || view_==View::Recovery)) {
+                if (view_==View::Recovery) { view_=auth_view(); render(); }
+                else if (view_==View::Pattern && vault_.status()==VaultStatus::Unlocked) cancel_pattern();
+                else recovery();
+            }
             else if (vault_.ready() && !pending_) {
                 if (view_==View::Pattern) { if (b) cancel_pattern(); }
                 else {
@@ -264,8 +306,10 @@ void Ui::tick() {
         view_ = vault_.ready() ? View::List : auth_view();
         action(yes); render();
     }
-    if (millis() - last_activity_ >= 30000 && !dark_) lock(true);
+    if (millis() - last_activity_ >= 30000 && !dark_) dim();
     if (pattern_submit_) submit_pattern();
+    if (!dark_ && (view_==View::List || view_==View::Code || view_==View::Settings) &&
+        (rendered_time_valid_!=board::rtc_valid() || rendered_usb_!=usb_)) render();
     uint32_t second = millis()/1000;
     if (second != last_second_ && !dark_) {
         last_second_ = second;
