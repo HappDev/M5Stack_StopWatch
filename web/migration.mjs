@@ -57,9 +57,13 @@ function int32(value) {
 
 function account(bytes) {
   const p = message(bytes, {1: 2, 2: 2, 3: 2, 4: 0, 5: 0, 6: 0, 7: 0});
-  if (p.get(6) !== 2n) throw new Error('Поддерживаются только коды по времени (TOTP); HOTP переносить нельзя');
-  const algorithm = {1: 'SHA1', 2: 'SHA256', 3: 'SHA512'}[String(p.get(4))];
-  const digits = {1: 6, 2: 8}[String(p.get(5))];
+  // Missing proto3 enums are zero (UNSPECIFIED). Google migration importers
+  // interpret these as TOTP/SHA1/6, e.g. Aegis GoogleAuthInfo.parseExportUri.
+  const type = p.get(6) ?? 0n;
+  if (![0n, 2n].includes(type)) throw new Error('Поддерживаются только коды по времени (TOTP); HOTP переносить нельзя');
+  if (type === 0n && (p.get(7) ?? 0n) !== 0n) throw new Error('Не указан тип OTP, но задан счётчик; такой аккаунт нельзя перенести как TOTP');
+  const algorithm = {0: 'SHA1', 1: 'SHA1', 2: 'SHA256', 3: 'SHA512'}[String(p.get(4) ?? 0n)];
+  const digits = {0: 6, 1: 6, 2: 8}[String(p.get(5) ?? 0n)];
   if (!algorithm || !digits) throw new Error('Неподдерживаемый алгоритм или число цифр');
   let name, issuer;
   try { name = utf8.decode(p.get(2) ?? new Uint8Array()).trim(); issuer = utf8.decode(p.get(3) ?? new Uint8Array()).trim(); }
@@ -92,7 +96,9 @@ export function parseGoogleMigration(input) {
     const p = message(bytes, {1: 2, 2: 0, 3: 0, 4: 0, 5: 0}, 1);
     const version = int32(p.get(2)), batchSize = p.has(3) ? int32(p.get(3)) : 1;
     const batchIndex = int32(p.get(4)), batchId = int32(p.get(5));
-    if (version !== 1) throw new Error('Эта версия экспорта Google Authenticator не поддерживается');
+    // Compatible exports include version 2 and metadata-free payloads (version 0).
+    // Keep future versions explicit rather than guessing their OTP semantics.
+    if (![0, 1, 2].includes(version)) throw new Error(`Версия экспорта Google Authenticator ${version} пока не поддерживается (поддерживаются 0, 1 и 2). Сообщите только этот номер версии.`);
     if (batchSize < 1 || batchSize > MAX_RECORDS || batchIndex < 0 || batchIndex >= batchSize) throw malformed();
     for (const entry of p.get(1) ?? []) {
       try { records.push(account(entry)); }

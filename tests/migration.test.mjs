@@ -2,6 +2,40 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseGoogleMigration,MigrationBatch,selectMigrationRecords} from '../web/migration.mjs';
 import {entry,migration,uri,blob,number} from './fixtures/migration.mjs';
+import {version2,withoutMetadata} from './fixtures/migration-public.mjs';
+
+test('published version 2 export decodes all three accounts without our fixture encoder',()=>{
+  const part=parseGoogleMigration(version2);
+  assert.equal(part.version,2);assert.equal(part.batchSize,1);assert.equal(part.batchIndex,0);
+  assert.deepEqual(part.records.map(({issuer,account,secret,algorithm,digits,period})=>({issuer,account,secret,algorithm,digits,period})),[
+    {issuer:'Test1',account:'test1@example1.com',secret:'JBSWY3DPEHPK3PXP',algorithm:'SHA1',digits:6,period:30},
+    {issuer:'Test2',account:'test2@example2.com',secret:'JBSWY3DPEHPK3PXQ',algorithm:'SHA1',digits:6,period:30},
+    {issuer:'Test3',account:'test3@example3.com',secret:'JBSWY3DPEHPK3PXR',algorithm:'SHA1',digits:6,period:30}
+  ]);
+});
+
+test('published export with omitted metadata uses single QR and SHA1/6 defaults',()=>{
+  const batch=new MigrationBatch();batch.add(withoutMetadata);
+  assert.equal(batch.complete,true);assert.equal(batch.metadata.version,0);
+  const [{id,...record}]=batch.records;
+  assert.deepEqual(record,{issuer:'Example',account:'alice@google.com',secret:'JBSWY3DPEHPK3PXP',algorithm:'SHA1',digits:6,period:30});
+});
+
+test('protobuf unspecified OTP enums use TOTP/SHA1/6 and preserve explicit parameters',()=>{
+  for(const version of [0,1,2]){
+    const part=parseGoogleMigration(migration([entry({type:0,algorithm:0,digits:0})],{version}));
+    assert.equal(part.records[0].algorithm,'SHA1');assert.equal(part.records[0].digits,6);
+    const omitted=uri([...blob(1,[...blob(1,'12345678901234567890'),...blob(2,'Test:user')]),...number(2,version)]);
+    assert.equal(parseGoogleMigration(omitted).records[0].period,30);
+  }
+  assert.throws(()=>parseGoogleMigration(migration([[...entry({type:0}),...number(7,5)]])),/счётчик/);
+});
+
+test('future export versions identify only the version, never the URI or secret',()=>{
+  for(const version of [-1,3,2147483647]){
+    assert.throws(()=>parseGoogleMigration(migration(undefined,{version})),{message:`Версия экспорта Google Authenticator ${version} пока не поддерживается (поддерживаются 0, 1 и 2). Сообщите только этот номер версии.`});
+  }
+});
 
 test('Google export preserves RFC key and TOTP parameters',()=>{
   const part=parseGoogleMigration(migration());const r=part.records[0];
@@ -33,11 +67,11 @@ test('malformed, duplicate, truncated and oversized protobuf never produces reco
     uri([...blob(1,entry()),...number(2,1),...number(2,1)]),
     uri([...blob(1,entry()),...blob(2,'wrong wire type')]),
     migration(undefined,{size:0}),migration(undefined,{size:101}),migration(undefined,{index:1}),
-    migration(undefined,{version:2}),migration([]), 'x'.repeat(65537)])assert.throws(()=>parseGoogleMigration(bad));
+    migration(undefined,{version:3}),migration([]), 'x'.repeat(65537)])assert.throws(()=>parseGoogleMigration(bad));
 });
 
 test('unsupported entries reject the whole QR before any import',()=>{
-  for(const overrides of [{type:1},{type:0},{algorithm:0},{algorithm:4},{digits:0},{digits:3},{secret:'short'},{issuer:'Я'.repeat(49)},
+  for(const overrides of [{type:1},{type:3},{algorithm:4},{algorithm:5},{digits:3},{secret:'short'},{issuer:'Я'.repeat(49)},
     {name:'a\nb'},{secret:'x'.repeat(129)},{name:new Uint8Array([255])}]){
     assert.throws(()=>parseGoogleMigration(migration([entry(),entry(overrides)])));
   }
@@ -61,6 +95,16 @@ test('multi-QR batches are complete only after every part; repeated QR is harmle
   assert.throws(()=>batch.add(migration()),/другого экспорта/);
   assert.throws(()=>batch.add(migration([entry({name:'changed'})],{size:2,index:0,id:9})),/разные аккаунты/);
   assert.equal(batch.records.length,2);
+});
+
+test('version 2 batches preserve ordering and reject mixing versions',()=>{
+  const batch=new MigrationBatch();
+  const first=migration([entry()],{version:2,size:2,index:0,id:17});
+  const second=migration([entry({name:'Example:bob'})],{version:2,size:2,index:1,id:17});
+  batch.add(second);assert.equal(batch.complete,false);
+  assert.throws(()=>batch.add(migration([entry()],{version:1,size:2,index:0,id:17})),/другого экспорта/);
+  batch.add(first);assert.equal(batch.complete,true);assert.equal(batch.add(first),false);
+  assert.deepEqual(batch.records.map(r=>r.account),['alice@example.com','bob']);
 });
 
 test('selection validates capacity and duplicates without replacing existing records',()=>{
