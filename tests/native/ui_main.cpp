@@ -38,8 +38,8 @@ static void click_text(otp::Ui& ui,const char* text) {
     lv_obj_update_layout(lv_screen_active());lv_area_t area;lv_obj_get_coords(button,&area);
     int x=(area.x1+area.x2)/2,y=(area.y1+area.y2)/2;sample(ui,x,y,true);sample(ui,x,y,false);
 }
-static void draw(otp::Ui& ui,const char* points,bool release=true) {
-    for(const char* p=points;*p;++p) sample(ui,otp::PatternGesture::PanelX+otp::PatternGesture::center_x(*p-'0'),otp::PatternGesture::PanelY+otp::PatternGesture::center_y(*p-'0'),true);
+static void draw(otp::Ui& ui,const char* points,bool release=true,int dx=0,int dy=0) {
+    for(const char* p=points;*p;++p) sample(ui,otp::PatternGesture::PanelX+otp::PatternGesture::center_x(*p-'0')+dx,otp::PatternGesture::PanelY+otp::PatternGesture::center_y(*p-'0')+dy,true);
     if(release)sample(ui,position.x,position.y,false);
 }
 static void screenshot(const char* name) {
@@ -95,6 +95,19 @@ static void ui_enrollment() {
     draw(ui,"1258");assert(v.ready());ui.lock();
     while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
     puts("PASS: real LVGL enrollment, confirmation mismatch, cancel/change, release, loss, overflow, retries and wake");
+}
+static void ui_wide_pattern_targets() {
+    fresh();otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb);ui.begin();
+    // Start below the bottom row, outside the old panel, and enroll off-center.
+    draw(ui,"7896",true,0,40);assert(find_text("Повторите рисунок"));
+    draw(ui,"7896",true,0,40);assert(v.ready());
+    const int offsets[][2]={{-40,0},{40,0},{0,-40},{0,40}};
+    for(const auto& offset:offsets) {
+        ui.lock();draw(ui,"7896",true,offset[0],offset[1]);assert(v.ready()&&counter==0);
+    }
+    ui.lock();draw(ui,"7896");assert(v.ready());ui.lock();
+    while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
+    puts("PASS: real LVGL off-center pattern enrollment/unlock at all four touch-target boundaries");
 }
 static void ui_migration() {
     legacy_fixture();otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb);ui.begin();
@@ -301,4 +314,4 @@ static void ui_bluetooth() {
     ui.lock();while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
     puts("PASS: LVGL BLE list-open/repeat, yellow navigation, rollover, scroll, wake, offline, lock, pairing confirmation/timeout, forget and off");
 }
-int main(){setvbuf(stdout,nullptr,_IONBF,0);radio_entropy_test();setup_lvgl();ui_enrollment();ui_migration();ui_session();ui_recovery_and_usb();ui_batch_import();ui_spinner();ui_account_codes();ui_bluetooth();puts("ALL LVGL UI TESTS PASSED");}
+int main(){setvbuf(stdout,nullptr,_IONBF,0);radio_entropy_test();setup_lvgl();ui_enrollment();ui_wide_pattern_targets();ui_migration();ui_session();ui_recovery_and_usb();ui_batch_import();ui_spinner();ui_account_codes();ui_bluetooth();puts("ALL LVGL UI TESTS PASSED");}

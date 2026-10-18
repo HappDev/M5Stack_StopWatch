@@ -133,7 +133,29 @@ static void gestures() {
     assert(g.valid()&&!strcmp(g.points(),"1236"));
     g.clear();g.start(left,top);g.move(left,bottom);g.move(right,bottom);g.move(right,top);assert(g.overflow()&&!g.valid());
     g.clear();assert(!g.overflow());
-    puts("PASS: gesture lengths, repeats, midpoints, fast/slow swipes, overflow, cancellation");
+    // A finger may land 40 px away from the visible dot, including at the edges.
+    const int offsets[][2]={{-40,0},{40,0},{0,-40},{0,40},{28,28},{-28,-28}};
+    for(int p=1;p<=9;++p)for(const auto& offset:offsets) {
+        g.start(otp::PatternGesture::center_x(p)+offset[0],otp::PatternGesture::center_y(p)+offset[1]);
+        assert(g.size()==1&&g.contains(p));
+    }
+    g.start(left,top+41);assert(!g.size());
+    g.move(right,top+41);assert(!g.size()); // Keep a gap between adjacent rows.
+    for(bool slow:{false,true}) {
+        g.start(left,top+40);
+        if(slow)for(int x=left+1;x<right;++x)g.move(x,top+40);
+        g.move(right,top+40);g.move(right,middle+40);
+        assert(g.valid()&&!strcmp(g.points(),"1236"));
+    }
+    // Wider targets must preserve every straight center-to-center transition,
+    // especially slanted moves such as 1->6 that pass close to other dots.
+    for(int from=1;from<=9;++from)for(int to=1;to<=9;++to) {
+        otp::PatternGesture expected;expected.add(from);expected.add(to);
+        g.start(otp::PatternGesture::center_x(from),otp::PatternGesture::center_y(from));
+        g.move(otp::PatternGesture::center_x(to),otp::PatternGesture::center_y(to));
+        assert(!strcmp(g.points(),expected.points()));
+    }
+    puts("PASS: gesture lengths, repeats, midpoints, wide targets, gaps, slanted/fast/slow swipes, overflow, cancellation");
 }
 static void migration() {
     legacy_fixture();otp::Vault v;assert(v.begin());assert(v.credential_kind()==otp::CredentialKind::LegacyPin);

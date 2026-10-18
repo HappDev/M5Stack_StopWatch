@@ -8,8 +8,10 @@ bool valid_pattern(const char* pattern);
 
 class PatternGesture {
 public:
-    static constexpr int Radius = 27;
-    static constexpr int PanelX = 97, PanelY = 122, PanelWidth = 272, PanelHeight = 256;
+    // Generous touch targets leave 16 px between neighboring hit circles.
+    static constexpr int Radius = 40;
+    // Include the full hit circles, including the bottom/right boundary pixels.
+    static constexpr int PanelX = 97, PanelY = 122, PanelWidth = 273, PanelHeight = 273;
     static constexpr int center_x(int point) { return 40 + ((point - 1) % 3) * 96; }
     static constexpr int center_y(int point) { return 40 + ((point - 1) / 3) * 96; }
     void clear();
