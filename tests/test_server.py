@@ -38,7 +38,11 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(headers['Cache-Control'], 'no-store')
         self.assertIn("connect-src 'none'", headers['Content-Security-Policy'])
         self.assertIn('serial=(self)', headers['Permissions-Policy'])
+        self.assertIn('camera=(self)', headers['Permissions-Policy'])
+        self.assertIn('microphone=()', headers['Permissions-Policy'])
         self.assertIn('text/javascript', self.request('/otp.mjs')[1]['Content-type'])
+        self.assertIn('text/javascript', self.request('/migration.mjs')[1]['Content-type'])
+        self.assertIn('text/javascript', self.request('/qr.mjs')[1]['Content-type'])
 
     def test_no_uploads_or_source_escape(self):
         self.assertEqual(self.request('/', 'POST')[0], 501)

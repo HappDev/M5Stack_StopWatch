@@ -1,6 +1,8 @@
 import {Device} from './serial.mjs';
 import {normalizeRecord, parseOtpAuth} from './otp.mjs';
 import {encryptBackup, decryptBackup} from './backup.mjs';
+import {MigrationBatch, recordKey, selectMigrationRecords} from './migration.mjs';
+import {readQrImage, scanQrCamera} from './qr.mjs';
 
 const $ = id => document.getElementById(id);
 let state = null, records = [], busy = false, modalBusy = false;
@@ -118,7 +120,7 @@ function add() {
     <p class="divider">ИЛИ ВВЕДИТЕ СЕКРЕТ ВРУЧНУЮ</p>${fields}
     <label class="field">Секрет Base32<input id="secret" type="password" autocomplete="new-password" spellcheck="false" placeholder="JBSWY3DPEHPK3PXP"></label>
     <div class="field-row"><label class="field">Алгоритм<select id="algorithm"><option>SHA1</option><option>SHA256</option><option>SHA512</option></select></label><label class="field">Цифр<select id="digits"><option>6</option><option>8</option></select></label><label class="field">Период, с<select id="period"><option>30</option><option>60</option></select></label></div>
-    <p class="modal-help">Подтвердите сервис и аккаунт на экране StopWatch. QR-коды переноса Google Authenticator не поддерживаются.</p>`,async()=>{
+    <p class="modal-help">Подтвердите сервис и аккаунт на экране StopWatch. Для экспорта Google используйте кнопку «Из Google Authenticator» в списке аккаунтов.</p>`,async()=>{
       const uri=$('uri').value.trim();let record;
       try{
         if(uri)parseOtpAuth(uri);
@@ -146,26 +148,121 @@ function add() {
     const generation=modalGeneration;
     const file=e.target.files[0];if(!file)return;
     try{
-      if(file.size>10*1024*1024)throw new Error('Картинка должна быть меньше 10 МБ');
-      const image=await createImageBitmap(file);
-      try{
-        if(image.width*image.height>16000000)throw new Error('Картинка слишком большая');
-        const scale=Math.min(1,1600/Math.max(image.width,image.height));const canvas=document.createElement('canvas');
-        canvas.width=Math.round(image.width*scale);canvas.height=Math.round(image.height*scale);
-        const context=canvas.getContext('2d',{willReadFrequently:true});context.drawImage(image,0,0,canvas.width,canvas.height);
-        const pixels=context.getImageData(0,0,canvas.width,canvas.height);
-        const decoded=window.jsQR(pixels.data,pixels.width,pixels.height,{inversionAttempts:'attemptBoth'});
-        pixels.data.fill(0);context.clearRect(0,0,canvas.width,canvas.height);canvas.width=canvas.height=0;
-        if(!decoded)throw new Error('QR-код не найден. Выберите более чёткую картинку.');
-        if(generation!==modalGeneration || !modal.open)return;
-        const parsed=parseOtpAuth(decoded.data);$('uri').value=decoded.data;fillParsed(parsed);
-        $('modal-error').textContent='QR-код прочитан. Проверьте название сервиса и аккаунта.';
-      }finally{image.close();}
-    }catch(error){$('modal-error').textContent=error.message;}
+      const decoded=await readQrImage(file);
+      if(generation!==modalGeneration || !modal.open || modalBusy)return;
+      if(decoded.startsWith('otpauth-migration:'))throw new Error('Закройте это окно и нажмите «Из Google Authenticator» для переноса одного или всех аккаунтов.');
+      const parsed=parseOtpAuth(decoded);$('uri').value=decoded;fillParsed(parsed);
+      $('modal-error').textContent='QR-код прочитан. Проверьте название сервиса и аккаунта.';
+    }catch(error){if(generation===modalGeneration && modal.open)$('modal-error').textContent=error.message;}
     finally{e.target.value='';}
   });
 }
 $('add').addEventListener('click',add);
+
+$('google-import').addEventListener('click',()=>{
+  const batch=new MigrationBatch(), selected=new Set();
+  let stopCamera=null, reading=false;
+  function stopScan(){
+    stopCamera?.();stopCamera=null;
+    if($('migration-video'))$('migration-video').hidden=true;
+    if($('migration-camera'))$('migration-camera').textContent='Сканировать камерой';
+  }
+  openModal('Из Google Authenticator',`
+    <p class="modal-help">На телефоне: меню → Перенос аккаунтов → Экспорт аккаунтов. Выберите один или все аккаунты и покажите каждый QR-код камере компьютера.</p>
+    <fieldset id="migration-source" class="migration-fieldset">
+      <button type="button" class="secondary" id="migration-camera">Сканировать камерой</button>
+      <video id="migration-video" class="migration-video" muted playsinline hidden></video>
+      <label class="field">Или загрузите фото / картинки QR<input id="migration-files" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+      <details><summary>Вставить уже считанную ссылку переноса</summary><label class="field">Ссылка otpauth-migration://<input id="migration-uri" type="password" autocomplete="new-password" spellcheck="false"></label><button type="button" class="secondary" id="migration-read">Прочитать ссылку</button></details>
+    </fieldset>
+    <p class="modal-help" id="migration-status" role="status">QR-коды ещё не прочитаны.</p>
+    <fieldset id="migration-selection" class="migration-fieldset" hidden>
+      <div class="migration-actions"><button type="button" class="text-button" id="migration-all">Выбрать все</button><button type="button" class="text-button" id="migration-none">Снять выбор</button><button type="button" class="text-button" id="migration-clear">Начать заново</button></div>
+      <div id="migration-records" class="migration-records"></div>
+    </fieldset>
+    <p class="modal-help">QR обрабатывается только в этом браузере. Сохранение каждого аккаунта подтвердите на StopWatch. После переноса сравните коды с телефоном.</p>`,async()=>{
+      if(reading)throw new Error('Дождитесь чтения картинки');
+      stopScan();
+      busy=true;render();$('migration-source').disabled=$('migration-selection').disabled=true;
+      let started=false, saved=0, total=0;
+      try{
+        await refresh(true);
+        if(!authorized())throw new Error('Разблокируйте StopWatch и разрешите USB в его настройках');
+        const chosen=selectMigrationRecords(batch,selected,records);total=chosen.length;
+        for(const record of chosen){
+          $('modal-error').textContent=`${saved+1} из ${total}: ${record.issuer} · ${record.account}. Подтвердите на StopWatch…`;
+          started=true;await device.request('upsert',{record});saved++;
+        }
+        await refresh(true);
+        notice(`Перенесено аккаунтов: ${saved}. Сравните коды с Google Authenticator и сохраните резервную копию.`);
+      }catch(error){
+        if(!started)throw error;
+        try{await refresh(true);}catch{}
+        notice(`Импорт остановлен. Подтверждено сохранение ${saved} из ${total}. ${error.message} Проверьте список на устройстве перед новым импортом.`,true);
+        // A lost reply may mean the last write succeeded. Never retry it automatically.
+      }finally{
+        busy=false;render();$('migration-source').disabled=$('migration-selection').disabled=false;
+      }
+    },'Перенести выбранные',()=>{stopScan();batch.clear();selected.clear();});
+  const generation=modalGeneration;
+  const active=()=>generation===modalGeneration && modal.open;
+  function preview(){
+    const list=$('migration-records');list.replaceChildren();
+    const seen=new Set(records.map(recordKey));
+    for(const record of batch.records){
+      const duplicate=seen.has(recordKey(record));seen.add(recordKey(record));
+      if(duplicate)selected.delete(record.id);
+      const label=node('label','migration-record'),checkbox=document.createElement('input');
+      checkbox.type='checkbox';checkbox.checked=selected.has(record.id);checkbox.disabled=duplicate;
+      checkbox.addEventListener('change',()=>{if(checkbox.checked)selected.add(record.id);else selected.delete(record.id);preview();});
+      const title=node('span','');title.append(node('strong','',record.issuer || 'Аккаунт'),node('small','',record.account));
+      if(duplicate)title.append(node('small','','Уже есть в списке или на устройстве — пропущен'));
+      label.append(checkbox,title);list.append(label);
+    }
+    $('migration-selection').hidden=!batch.records.length;
+    const expected=batch.metadata?.batchSize ?? 0;
+    $('migration-status').textContent=expected ? `Прочитано QR: ${batch.parts.size} из ${expected}. Аккаунтов: ${batch.records.length}. Выбрано: ${selected.size}.${batch.complete?'':' Прочитайте оставшиеся QR этого экспорта.'}` : 'QR-коды ещё не прочитаны.';
+  }
+  function accept(uri){
+    if(!active() || modalBusy)return;
+    const before=new Set(batch.records.map(r=>r.id));
+    const added=batch.add(uri);
+    for(const r of batch.records)if(!before.has(r.id))selected.add(r.id);
+    preview();$('modal-error').textContent=added?'QR прочитан. Проверьте аккаунты в списке.':'Этот QR уже прочитан.';
+    if(batch.complete)stopScan();
+  }
+  $('migration-read').addEventListener('click',()=>{
+    if(reading || modalBusy)return;
+    try{accept($('migration-uri').value);}catch(error){$('modal-error').textContent=error.message;}
+    finally{$('migration-uri').value='';}
+  });
+  $('migration-uri').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('migration-read').click();}});
+  $('migration-files').addEventListener('change',async e=>{
+    if(reading || modalBusy)return;
+    const files=[...e.target.files];stopScan();reading=true;
+    $('migration-source').disabled=$('migration-selection').disabled=$('modal-submit').disabled=true;
+    try{
+      for(const file of files){
+        const uri=await readQrImage(file);
+        if(!active())return;
+        accept(uri);
+      }
+    }catch(error){if(active())$('modal-error').textContent=error.message;}
+    finally{reading=false;e.target.value='';if(active())$('migration-source').disabled=$('migration-selection').disabled=$('modal-submit').disabled=false;}
+  });
+  $('migration-camera').addEventListener('click',()=>{
+    if(stopCamera){stopScan();return;}
+    const video=$('migration-video');video.hidden=false;$('migration-camera').textContent='Остановить камеру';
+    stopCamera=scanQrCamera(video,uri=>{
+      if(!active() || reading || modalBusy)return;
+      try{accept(uri);}catch(error){$('modal-error').textContent=error.message;}
+    },error=>{if(active()){stopScan();$('modal-error').textContent=error.message;}});
+  });
+  $('migration-all').addEventListener('click',()=>{for(const r of batch.records)selected.add(r.id);preview();});
+  $('migration-none').addEventListener('click',()=>{selected.clear();preview();});
+  $('migration-clear').addEventListener('click',()=>{stopScan();batch.clear();selected.clear();preview();$('modal-error').textContent='';});
+});
+
 function rename(r) {
   openModal('Изменить название',fields,async()=>{
     const issuer=$('issuer').value,account=$('account').value;
