@@ -1,0 +1,6 @@
+{
+  "M5GFX": {"url":"https://github.com/m5stack/M5GFX.git","ref":"0.2.19","commit":"53a7184601f3667b030ba141c58b87ce2acfaa2a"},
+  "M5PM1": {"url":"https://github.com/m5stack/M5PM1.git","ref":"1.0.6","commit":"8f1f1a60b3040088cd0ca2b9eb9d024ccc4d907f"},
+  "M5IOE1": {"url":"https://github.com/m5stack/M5IOE1.git","ref":"1.0.8","commit":"37db04861687858b6748f5dbd1a84439a6635c46"},
+  "lvgl": {"url":"https://github.com/lvgl/lvgl.git","ref":"v9.5.0","commit":"85aa60d18b3d5e5588d7b247abf90198f07c8a63"}
+}

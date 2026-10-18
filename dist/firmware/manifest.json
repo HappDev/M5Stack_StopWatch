@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "idf": "5.5.4",
+  "chip": "esp32s3",
+  "secureBoot": false,
+  "flashEncryption": false,
+  "efuseProgramming": false,
+  "files": {
+    "stopwatch_otp.bin": {
+      "sha256": "d1a85b9fd6eeb1ec92f335088d42d3913ed61289e3aff509c5a38977b37a39a5",
+      "size": 1025264
+    },
+    "bootloader/bootloader.bin": {
+      "sha256": "14b8d5558fc91bbd543ce2e346f02d232af19daa7505d187c9def6f3b1e4394a",
+      "size": 13696
+    },
+    "partition_table/partition-table.bin": {
+      "sha256": "e3738663503590d5136298d5b7cff04b3c7459d840fdd6686d1f702542a95202",
+      "size": 3072
+    }
+  }
+}
