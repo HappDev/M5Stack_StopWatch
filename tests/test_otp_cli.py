@@ -51,6 +51,44 @@ class FakeSerial:
         self.is_open = False
 
 class CliTests(unittest.TestCase):
+    def test_batch_one_confirmation_and_preserved_uuid(self):
+        calls = []
+        class Device:
+            def request(self, op, args=None):
+                calls.append((op, args))
+                return {}
+        rows = [cli.normalize_record({'issuer':'Test','secret':SECRET}) for _ in range(3)]
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            cli.import_batch(Device(), {'batchImport':True}, rows)
+        self.assertEqual([op for op, _ in calls], ['import_begin','import_item','import_item','import_item','import_commit'])
+        self.assertEqual(calls[0][1], {'count':3})
+        self.assertEqual([args['record']['id'] for op, args in calls if op == 'import_item'], [r['id'] for r in rows])
+        self.assertIn('один раз', output.getvalue())
+        self.assertNotIn(SECRET, output.getvalue())
+
+    def test_batch_old_firmware_never_writes(self):
+        class Device:
+            def request(self, *args):
+                raise AssertionError('No USB writes expected')
+        for state in ({}, {'batchImport':False}, {'batchImport':'true'}):
+            with self.assertRaisesRegex(cli.CliError, 'обновите прошивку'):
+                cli.import_batch(Device(), state, [{'secret':SECRET}])
+
+    def test_batch_item_and_commit_failure_do_not_retry(self):
+        for failure in ('import_item','import_commit'):
+            calls = []
+            class Device:
+                def request(self, op, args=None):
+                    calls.append(op)
+                    if op == failure:
+                        raise cli.RequestTimeout('lost reply')
+                    return {}
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(cli.CliError) as error:
+                cli.import_batch(Device(), {'batchImport':True}, [{'secret':SECRET}, {'secret':SECRET}])
+            expected = ['import_begin','import_item','import_abort'] if failure == 'import_item' else ['import_begin','import_item','import_item','import_commit','import_abort']
+            self.assertEqual(calls, expected)
+            self.assertNotIn(SECRET, str(error.exception))
+
     def test_base32_uri_and_limits(self):
         row = cli.parse_uri('otpauth://totp/Test:alice?secret=' + SECRET + '&issuer=Test&algorithm=SHA512&digits=8&period=60')
         self.assertEqual((row['issuer'], row['account'], row['algorithm'], row['digits'], row['period']), ('Test','alice','SHA512',8,60))

@@ -94,7 +94,9 @@ void Protocol::error(int id, const char* code, const char* message) {
     auto* text=cJSON_PrintUnformatted(o); if (text) { send(text);cJSON_free(text); } cJSON_Delete(o);
 }
 void Protocol::clear_transfers() {
-    wipe(staging_.data(),sizeof staging_); staged_=expected_=export_index_=0; restoring_=exporting_=false;
+    wipe(staging_.data(),sizeof staging_); wipe(import_seen_.data(),sizeof import_seen_);
+    staged_=expected_=export_index_=import_count_=import_added_=import_updated_=0;
+    restoring_=importing_=exporting_=false;
 }
 void Protocol::disconnected() {
     authorized_=false; ui_.cancel(); pending_=false; clear_transfers(); wipe(line_,sizeof line_); line_size_=0; overflow_=false;
@@ -104,6 +106,7 @@ void Protocol::disconnected() {
 }
 void Protocol::status(int id) {
     auto* o=object(); cJSON_AddStringToObject(o,"firmware","0.1.0");
+    cJSON_AddBoolToObject(o,"batchImport",true);
     const char* state = vault_.status()==VaultStatus::Empty?"empty":vault_.status()==VaultStatus::Locked?"locked":
         vault_.status()==VaultStatus::Unlocked?(vault_.ready()?"unlocked":"locked"):vault_.status()==VaultStatus::Damaged?"damaged":"storage_error";
     cJSON_AddStringToObject(o,"state",state); cJSON_AddBoolToObject(o,"authorized",authorized_ && vault_.ready());
@@ -129,6 +132,11 @@ void Protocol::receive(char* line) {
     if (!strcmp(op,"lock")) { ui_.lock(); clear_transfers(); reply(id,object()); return; }
     if (!vault_.ready() || !authorized_) { error(id,"LOCKED","Разблокируйте StopWatch и разрешите USB"); return; }
     if (pending_) { error(id,"BUSY","Подтвердите действие на StopWatch"); return; }
+    // Freeze the original vault until the staged merge is committed or aborted.
+    // Otherwise a later rename/delete/upsert could be lost when we replace it.
+    if (importing_ && strcmp(op,"import_item") && strcmp(op,"import_commit") && strcmp(op,"import_abort") && strcmp(op,"list")) {
+        error(id,"BUSY","Завершите или отмените импорт аккаунтов"); return;
+    }
     transfer_activity_=esp_timer_get_time();
     if (!strcmp(op,"list")) {
         int64_t offset;
@@ -138,6 +146,29 @@ void Protocol::receive(char* line) {
         for(size_t i=offset;i<end;++i) cJSON_AddItemToArray(rows,record_json(vault_.record(i),false));
         cJSON_AddNumberToObject(o,"total",vault_.count()); cJSON_AddItemToObject(o,"records",rows); reply(id,o); return;
     }
+    if (!strcmp(op,"import_begin")) {
+        int64_t count;
+        if (!integer(args,"count",count,1,MaxRecords)) { error(id,"INPUT","Выберите от 1 до 100 аккаунтов");return; }
+        clear_transfers(); importing_=true; expected_=count; import_count_=vault_.count();
+        for(size_t i=0;i<import_count_;++i) staging_[i]=vault_.record(i);
+        reply(id,object());return;
+    }
+    if (!strcmp(op,"import_item")) {
+        int64_t index; Record r{};
+        bool valid=importing_ && integer(args,"index",index,0,MaxRecords-1) && static_cast<size_t>(index)==staged_ && staged_<expected_ &&
+            parse_record(cJSON_GetObjectItemCaseSensitive(args,"record"),r);
+        size_t slot=0;
+        if(valid) {
+            for(;slot<import_count_;++slot) if(!strcmp(staging_[slot].id,r.id)) break;
+            valid=slot<MaxRecords && !import_seen_[slot];
+        }
+        if(valid) {
+            if(slot==import_count_) {++import_count_;++import_added_;} else ++import_updated_;
+            staging_[slot]=r;import_seen_[slot]=true;++staged_;reply(id,object());
+        } else {clear_transfers();error(id,"INPUT","Импорт отменён: неверная запись, повтор UUID или превышен лимит");}
+        wipe(&r,sizeof r);return;
+    }
+    if (!strcmp(op,"import_abort")) { clear_transfers();reply(id,object());return; }
     if (!strcmp(op,"restore_begin")) {
         int64_t count;
         if (!integer(args,"count",count,0,MaxRecords)) { error(id,"INPUT","Лимит: 100 аккаунтов");return; }
@@ -192,6 +223,11 @@ void Protocol::receive(char* line) {
         // Apply elapsed confirmation time, rather than the stale timestamp from request arrival.
     } else if (!strcmp(op,"export_begin")) {
         clear_transfers();question="Передать все секреты\nэтому компьютеру?\nСоздавайте копию только\nна доверенном ПК.";
+    } else if (!strcmp(op,"import_commit")) {
+        if(!importing_ || staged_!=expected_) {error(id,"STATE","Получены не все аккаунты импорта");return;}
+        question="Импортировать аккаунты?\nДобавить: "+std::to_string(import_added_)+
+            "\nЗаменить: "+std::to_string(import_updated_)+"\nВсего после: "+std::to_string(import_count_)+
+            "\nОдно подтверждение\nдля всего набора.";
     } else if (!strcmp(op,"restore_commit")) {
         if(!restoring_ || staged_!=expected_) { error(id,"STATE","Получены не все аккаунты");return; }
         question="Заменить ВСЕ аккаунты\nданными резервной копии?\nАккаунтов: "+std::to_string(staged_);
@@ -216,6 +252,8 @@ void Protocol::receive(char* line) {
             ok=board::set_time(epoch+(esp_timer_get_time()-received_at)/1000000);
         } else if(!strcmp(op,"export_begin")) {
             exporting_=vault_.count()>0;export_index_=0;auto* o=object();cJSON_AddNumberToObject(o,"count",vault_.count());reply(id,o);return;
+        } else if(!strcmp(op,"import_commit")) {
+            ok=importing_ && staged_==expected_ && vault_.replace(staging_.data(),import_count_);clear_transfers();
         } else if(!strcmp(op,"restore_commit")) { ok=vault_.replace(staging_.data(),staged_);clear_transfers(); }
         if(ok) reply(id,object());else error(id,"FAILED",!strcmp(op,"time_set")?"Не удалось записать RTC":vault_.error());
         ui_.refresh();
@@ -227,7 +265,7 @@ void Protocol::tick() {
     if(connected!=was_connected_) { disconnected();was_connected_=connected; }
     if(!vault_.ready()) authorized_=false;
     if(!authorized_ || !vault_.ready()) clear_transfers();
-    if(!pending_ && (restoring_ || exporting_) && esp_timer_get_time()-transfer_activity_>15000000) clear_transfers();
+    if(!pending_ && (restoring_ || importing_ || exporting_) && esp_timer_get_time()-transfer_activity_>15000000) clear_transfers();
     if(line_size_ && esp_timer_get_time()-line_started_>3000000) {wipe(line_,sizeof line_);line_size_=0;overflow_=true;}
     if(!connected) return;
     uint8_t chunk[256];size_t n=0;

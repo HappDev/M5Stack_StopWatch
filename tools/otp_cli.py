@@ -34,6 +34,28 @@ class DeviceError(CliError):
         self.code = code
         super().__init__(ERRORS.get(code, 'Ошибка устройства. Проверьте его экран.'))
 
+def import_batch(device, state, records):
+    if state.get('batchImport') is not True:
+        raise CliError('Для одного подтверждения обновите прошивку StopWatch с сохранением аккаунтов по инструкции.')
+    if not records:
+        raise CliError('В файле нет аккаунтов для импорта.')
+    committing = False
+    try:
+        device.request('import_begin', {'count':len(records)})
+        for index, record in enumerate(records):
+            device.request('import_item', {'index':index, 'record':record})
+        print(f'Подтвердите импорт {len(records)} аккаунтов на StopWatch один раз.', flush=True)
+        committing = True
+        device.request('import_commit')
+    except (CliError, OSError) as error:
+        try:
+            device.request('import_abort')
+        except (CliError, OSError):
+            pass
+        if committing:
+            raise CliError('Сохранение набора не подтверждено. Проверьте список на StopWatch перед повторным импортом.') from None
+        raise CliError('Импорт остановлен до сохранения набора.') from None
+
 def strict_json(text):
     def pairs(items):
         result = {}
@@ -345,12 +367,14 @@ def main(argv=None):
                 new_ids = {r['id'] for r in records} - {r['id'] for r in current}
                 if len(current) + len(new_ids) > 100:
                     raise CliError('Для набора не хватает места: лимит 100 аккаунтов. Импорт не начат.')
-                saved = 0
-                for record in records:
+                if args.command == 'import':
+                    import_batch(device, state, records)
+                    print(f'Сохранён весь набор: {len(records)} аккаунтов.', flush=True)
+                else:
+                    record = records[0]
                     print(f"Подтвердите на StopWatch: {record['issuer']} · {record['account']} ({record['algorithm']}/{record['digits']}/{record['period']}).", flush=True)
-                    device.request('upsert', {'record': record})
-                    saved += 1
-                    print(f"Сохранено {saved}/{len(records)}; UUID: {record['id']}", flush=True)
+                    device.request('upsert', {'record':record})
+                    print(f"Сохранено; UUID: {record['id']}", flush=True)
                 print('Готово. Обновите резервную копию. USB-разрешение будет сброшено при закрытии порта.')
     finally:
         for record in records:

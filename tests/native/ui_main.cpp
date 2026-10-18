@@ -153,4 +153,23 @@ static void ui_recovery_and_usb() {
     while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
     puts("PASS: separate reset screen, cancellation preserves accounts, USB shortcuts for missing time/records and live state refresh");
 }
-int main(){setvbuf(stdout,nullptr,_IONBF,0);setup_lvgl();ui_enrollment();ui_migration();ui_session();ui_recovery_and_usb();puts("ALL LVGL UI TESTS PASSED");}
+static void ui_batch_import() {
+    fresh();otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb);ui.begin();
+    draw(ui,"1236");draw(ui,"1236");assert(v.upsert(record()));ui.refresh();
+    otp::Protocol p(v,ui,usb);assert(p.begin());usb_connected=true;p.tick();
+    click_text(ui,"Настройки");click_text(ui,"Разрешить USB");assert(usb);
+    assert(ok(rpc(p,"import_begin","{\"count\":2}")));
+    assert(ok(rpc(p,"import_item",item_args(0,record(1)))));assert(ok(rpc(p,"import_item",item_args(1,record(2)))));
+    assert(v.count()==1&&!find_text("Подтверждение"));assert(!rpc(p,"import_commit"));
+    assert(find_text("Импортировать аккаунты?\nДобавить: 2\nЗаменить: 0\nВсего после: 3\nОдно подтверждение\nдля всего набора."));
+    screenshot("batch-import-confirmation");click_text(ui,"Разрешить");
+    assert(ok(cJSON_Parse(usb_tx.c_str()))&&v.count()==3&&!find_text("Подтверждение"));
+    assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(ok(rpc(p,"import_item",item_args(0,record(3)))));
+    assert(!rpc(p,"import_commit"));click_text(ui,"Отмена");assert(v.count()==3&&!find_text("Подтверждение"));
+    assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(ok(rpc(p,"import_item",item_args(0,record(3)))));
+    assert(!rpc(p,"import_commit"));advance(31000);ui.tick();assert(!usb&&v.count()==3&&v.ready());
+    assert(!ok(rpc(p,"import_commit")));ui.lock();
+    while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
+    puts("PASS: real LVGL batch summary, single confirmation, cancellation and display sleep discard staged import");
+}
+int main(){setvbuf(stdout,nullptr,_IONBF,0);setup_lvgl();ui_enrollment();ui_migration();ui_session();ui_recovery_and_usb();ui_batch_import();puts("ALL LVGL UI TESTS PASSED");}

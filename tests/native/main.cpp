@@ -27,6 +27,8 @@ static int64_t applied_time=0;
 static bool rtc_ok=true;
 static std::string usb_rx,usb_tx;
 static std::function<void(bool)> confirm_action;
+static unsigned confirmation_count=0;
+static std::string confirmation_text;
 esp_err_t tinyusb_driver_install(const tinyusb_config_t*){return ESP_OK;}
 esp_err_t tusb_cdc_acm_init(const tinyusb_config_cdcacm_t*){return ESP_OK;}
 bool tud_cdc_connected(){return usb_connected;}
@@ -36,7 +38,7 @@ esp_err_t tinyusb_cdcacm_read(int,uint8_t* p,size_t cap,size_t* n){*n=std::min(c
 namespace board {bool rtc_valid(){return rtc_ok;}int64_t now(){return 1234567890;}bool set_time(int64_t t){applied_time=t;rtc_ok=true;return true;}uint16_t battery_mv(){return 3900;}}
 namespace otp {
 #ifndef STOPWATCH_UI_TESTS
-bool Ui::ask(const std::string&,std::function<void(bool)> action){if(confirm_action)return false;confirm_action=std::move(action);return true;}
+bool Ui::ask(const std::string& text,std::function<void(bool)> action){if(confirm_action)return false;++confirmation_count;confirmation_text=text;confirm_action=std::move(action);return true;}
 void Ui::cancel(){auto cb=std::move(confirm_action);confirm_action={};if(cb)cb(false);}
 void Ui::lock(bool){usb_=false;cancel();if(on_lock_)on_lock_();vault_.lock();}
 void Ui::refresh(){}
@@ -245,6 +247,86 @@ static cJSON* rpc(otp::Protocol& p,const std::string& operation,const std::strin
 }
 static void confirm(bool yes){auto cb=std::move(confirm_action);confirm_action={};assert(cb);cb(yes);}
 static bool ok(cJSON* r){bool value=r&&cJSON_IsTrue(cJSON_GetObjectItem(r,"ok"));cJSON_Delete(r);return value;}
+static std::string item_args(size_t index,const otp::Record& r){
+    auto* args=cJSON_CreateObject();cJSON_AddNumberToObject(args,"index",index);
+    auto* row=cJSON_AddObjectToObject(args,"record");
+    cJSON_AddStringToObject(row,"id",r.id);cJSON_AddStringToObject(row,"issuer",r.issuer);cJSON_AddStringToObject(row,"account",r.account);
+    auto secret=otp::base32_encode(r.secret,r.secret_len);cJSON_AddStringToObject(row,"secret",secret.c_str());
+    cJSON_AddStringToObject(row,"algorithm",otp::algorithm_name(r.algorithm));cJSON_AddNumberToObject(row,"digits",r.digits);cJSON_AddNumberToObject(row,"period",r.period);
+    auto* text=cJSON_PrintUnformatted(args);std::string result=text;cJSON_free(text);cJSON_Delete(args);return result;
+}
+static void batch_import_tests(){
+    fresh();otp::Vault v;assert(v.begin());assert(v.create_pattern("1236"));assert(v.upsert(record()));assert(v.upsert(record(1)));
+    bool authorized=false;otp::Ui ui(v,authorized);otp::Protocol p(v,ui,authorized);assert(p.begin());
+    usb_connected=true;p.tick();
+    auto* status=rpc(p,"status");assert(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(status,"result"),"batchImport")));cJSON_Delete(status);
+    assert(!ok(rpc(p,"import_begin","{\"count\":2}")));authorized=true;
+    for(auto count:{0,101})assert(!ok(rpc(p,"import_begin","{\"count\":"+std::to_string(count)+"}")));
+    auto changed=record();strcpy(changed.issuer,"Updated");auto original_flash=flash;unsigned asked=confirmation_count;
+    assert(ok(rpc(p,"import_begin","{\"count\":2}")));
+    assert(ok(rpc(p,"import_item",item_args(0,changed))));
+    assert(!ok(rpc(p,"import_commit")));assert(!confirm_action);
+    for(auto op:{"upsert","delete","rename","restore_begin","restore_commit","export_begin","import_begin","time_set"})assert(!ok(rpc(p,op)));
+    assert(ok(rpc(p,"list","{\"offset\":0}")));
+    assert(ok(rpc(p,"import_item",item_args(1,record(2)))));
+    assert(v.count()==2&&!strcmp(v.record(0).issuer,"PrivateMail")&&flash==original_flash);
+    assert(confirmation_count==asked);assert(!rpc(p,"import_commit"));assert(confirmation_count==asked+1);
+    assert(confirmation_text.find("Добавить: 1")!=std::string::npos&&confirmation_text.find("Заменить: 1")!=std::string::npos);
+    assert(!ok(rpc(p,"import_item",item_args(2,record(3)))));usb_tx.clear();
+    clock_us+=20000000;p.tick();confirm(true);assert(ok(cJSON_Parse(usb_tx.c_str())));
+    assert(v.count()==3&&!strcmp(v.record(0).issuer,"Updated"));
+    auto kept=record(1);assert(!memcmp(&v.record(1),&kept,sizeof kept));
+    assert(!ok(rpc(p,"import_commit")));assert(confirmation_count==asked+1);
+    original_flash=flash;
+    assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(ok(rpc(p,"import_item",item_args(0,record(3)))));
+    assert(!rpc(p,"import_commit"));confirm(false);assert(v.count()==3&&flash==original_flash);
+    // Bad index, duplicate UUID, invalid record, or an extra item abort the entire staging area.
+    assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(!ok(rpc(p,"import_item",item_args(1,record(3)))));
+    assert(!ok(rpc(p,"import_commit")));
+    assert(ok(rpc(p,"import_begin","{\"count\":2}")));assert(ok(rpc(p,"import_item",item_args(0,record(3)))));
+    assert(!ok(rpc(p,"import_item",item_args(1,record(3)))));assert(!ok(rpc(p,"import_commit")));
+    auto invalid=record(3);invalid.digits=7;
+    assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(!ok(rpc(p,"import_item",item_args(0,invalid))));
+    assert(!ok(rpc(p,"import_commit")));
+    assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(ok(rpc(p,"import_item",item_args(0,record(3)))));
+    assert(!ok(rpc(p,"import_item",item_args(1,record(4)))));assert(!ok(rpc(p,"import_commit")));
+    for(int reason=0;reason<4;++reason){
+        assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(ok(rpc(p,"import_item",item_args(0,record(3)))));
+        if(reason==0)assert(ok(rpc(p,"import_abort")));
+        if(reason==1){clock_us+=16000000;p.tick();}
+        if(reason==2){usb_connected=false;p.tick();usb_connected=true;p.tick();assert(!authorized);authorized=true;}
+        if(reason==3){ui.lock();assert(v.unlock_pattern("1236"));authorized=true;}
+        assert(!ok(rpc(p,"import_commit")));assert(!confirm_action);assert(v.count()==3&&flash==original_flash);
+    }
+    // Disconnect while the one confirmation is pending cancels it too.
+    assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(ok(rpc(p,"import_item",item_args(0,record(3)))));
+    assert(!rpc(p,"import_commit"));usb_connected=false;p.tick();assert(!confirm_action&&flash==original_flash);
+    usb_connected=true;p.tick();authorized=true;
+    std::array<otp::Record,otp::MaxRecords> full{};for(size_t i=0;i<full.size();++i)full[i]=record(i);
+    assert(v.replace(full.data(),full.size()));original_flash=flash;
+    assert(ok(rpc(p,"import_begin","{\"count\":1}")));assert(!ok(rpc(p,"import_item",item_args(0,record(100)))));
+    assert(!ok(rpc(p,"import_commit")));assert(v.count()==100&&flash==original_flash);
+    assert(ok(rpc(p,"import_begin","{\"count\":100}")));
+    for(size_t i=0;i<full.size();++i)assert(ok(rpc(p,"import_item",item_args(i,full[i]))));
+    asked=confirmation_count;assert(!rpc(p,"import_commit"));confirm(true);assert(confirmation_count==asked+1&&v.count()==100);
+    v.lock();assert(v.unlock_pattern("1236"));assert(v.count()==100);
+    puts("PASS: one-consent atomic batch merge, preserved accounts, 100 records, cancellation, duplicate/order/capacity validation, timeout and disconnect");
+}
+static void batch_import_power_cuts(){
+    for(int cut=0;cut<=4;++cut){
+        fresh();{
+            otp::Vault v;assert(v.begin());assert(v.create_pattern("1236"));assert(v.upsert(record()));
+            bool authorized=false;otp::Ui ui(v,authorized);otp::Protocol p(v,ui,authorized);assert(p.begin());usb_connected=true;p.tick();authorized=true;
+            assert(ok(rpc(p,"import_begin","{\"count\":2}")));
+            assert(ok(rpc(p,"import_item",item_args(0,record(1)))));assert(ok(rpc(p,"import_item",item_args(1,record(2)))));
+            assert(!rpc(p,"import_commit"));cut_after=cut;confirm(true);
+        }
+        cut_after=-1;otp::Vault reboot;assert(reboot.begin());assert(reboot.unlock_pattern("1236"));
+        assert(reboot.count()==(cut<4?1:3));
+        for(size_t i=0;i<reboot.count();++i){auto expected=record(i);assert(!memcmp(&reboot.record(i),&expected,sizeof expected));}
+    }
+    puts("PASS: batch flash power cuts retain either all old or all new records, never a partial import");
+}
 static void protocol_tests(){
     fresh();otp::Vault v;assert(v.begin());assert(v.create_pattern("1236"));assert(v.upsert(record()));
     bool authorized=false;otp::Ui ui(v,authorized);otp::Protocol p(v,ui,authorized);assert(p.begin());
@@ -284,10 +366,10 @@ static void migration_usb() {
     auto* status=rpc(p,"status");auto* result=cJSON_GetObjectItem(status,"result");
     assert(!strcmp(cJSON_GetObjectItem(result,"state")->valuestring,"locked"));
     assert(cJSON_IsFalse(cJSON_GetObjectItem(result,"authorized")));cJSON_Delete(status);
-    for(auto op:{"list","export_begin","time_set","restore_begin"}) {authorized=true;assert(!ok(rpc(p,op)));assert(!confirm_action);}
+    for(auto op:{"list","export_begin","time_set","restore_begin","import_begin","import_item","import_commit"}) {authorized=true;assert(!ok(rpc(p,op)));assert(!confirm_action);}
     assert(v.count()==1&&!v.ready());ui.lock();assert(v.status()==otp::VaultStatus::Locked);
     puts("PASS: pending PIN migration rejects USB metadata, export and mutations even with stale authorization");
 }
 #ifndef STOPWATCH_UI_TESTS
-int main(){setvbuf(stdout,nullptr,_IONBF,0);gestures();vectors();crypto_interop();encryption();power_cuts();retries();migration();protocol_tests();migration_usb();puts("ALL NATIVE TESTS PASSED");}
+int main(){setvbuf(stdout,nullptr,_IONBF,0);gestures();vectors();crypto_interop();encryption();power_cuts();retries();migration();protocol_tests();batch_import_tests();batch_import_power_cuts();migration_usb();puts("ALL NATIVE TESTS PASSED");}
 #endif

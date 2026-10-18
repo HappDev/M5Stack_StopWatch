@@ -3,8 +3,8 @@
   "firstInstallOnly": true,
   "inputs": {
     "stopwatch_otp.bin": {
-      "sha256": "cf1b4e1891ecf4dde00c2271e55028fea96dd463e151ad6034d4357c0c7f3303",
-      "size": 1031504
+      "sha256": "ec90b1b1c786ee3bfdd9442d833fc8ede4785e49f7d6eb40736c8e538c5bfab0",
+      "size": 1033616
     },
     "bootloader/bootloader.bin": {
       "sha256": "14b8d5558fc91bbd543ce2e346f02d232af19daa7505d187c9def6f3b1e4394a",
@@ -15,6 +15,6 @@
       "size": 3072
     }
   },
-  "size": 1097040,
-  "sha256": "40f0235f7be18a4b2db2bd096c55d453795aebb3be6a3ba01731b0d25e3acf35"
+  "size": 1099152,
+  "sha256": "b25c533c98cb4eb6f20bb2a8f416e95fe529a59a03aeeec1e50346d9a2bf6b15"
 }

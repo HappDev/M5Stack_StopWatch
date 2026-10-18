@@ -3,6 +3,7 @@ import {normalizeRecord, parseOtpAuth} from './otp.mjs';
 import {encryptBackup, decryptBackup} from './backup.mjs';
 import {MigrationBatch, recordKey, selectMigrationRecords} from './migration.mjs';
 import {readQrImage, scanQrCamera} from './qr.mjs';
+import {importBatch, requireBatchImport} from './import.mjs';
 
 const $ = id => document.getElementById(id);
 let state = null, records = [], busy = false, modalBusy = false;
@@ -180,26 +181,29 @@ $('google-import').addEventListener('click',()=>{
       <div class="migration-actions"><button type="button" class="text-button" id="migration-all">Выбрать все</button><button type="button" class="text-button" id="migration-none">Снять выбор</button><button type="button" class="text-button" id="migration-clear">Начать заново</button></div>
       <div id="migration-records" class="migration-records"></div>
     </fieldset>
-    <p class="modal-help">QR обрабатывается только в этом браузере. Сохранение каждого аккаунта подтвердите на StopWatch. После переноса сравните коды с телефоном.</p>`,async()=>{
+    <p class="modal-help">QR обрабатывается только в этом браузере. На StopWatch потребуется одно подтверждение для всей выбранной группы. После переноса сравните коды с телефоном.</p>`,async()=>{
       if(reading)throw new Error('Дождитесь чтения картинки');
       stopScan();
       busy=true;render();$('migration-source').disabled=$('migration-selection').disabled=true;
-      let started=false, saved=0, total=0;
+      let started=false, saved=false, total=0;
       try{
         await refresh(true);
         if(!authorized())throw new Error('Разблокируйте StopWatch и разрешите USB в его настройках');
+        requireBatchImport(state);
         const chosen=selectMigrationRecords(batch,selected,records);total=chosen.length;
-        for(const record of chosen){
-          $('modal-error').textContent=`${saved+1} из ${total}: ${record.issuer} · ${record.account}. Подтвердите на StopWatch…`;
-          started=true;await device.request('upsert',{record});saved++;
-        }
+        started=true;
+        await importBatch(device,state,chosen,progress=>{
+          $('modal-error').textContent=progress.phase==='sending' ? `Передача аккаунтов: ${progress.index+1} из ${total}…` :
+            `Подтвердите импорт ${total} аккаунтов на StopWatch один раз…`;
+        });
+        saved=true;
         await refresh(true);
-        notice(`Перенесено аккаунтов: ${saved}. Сравните коды с Google Authenticator и сохраните резервную копию.`);
+        notice(`Перенесено аккаунтов: ${total}. Сравните коды с Google Authenticator и сохраните резервную копию.`);
       }catch(error){
         if(!started)throw error;
         try{await refresh(true);}catch{}
-        notice(`Импорт остановлен. Подтверждено сохранение ${saved} из ${total}. ${error.message} Проверьте список на устройстве перед новым импортом.`,true);
-        // A lost reply may mean the last write succeeded. Never retry it automatically.
+        notice(saved ? `Сохранено аккаунтов: ${total}, но не удалось обновить список. ${error.message}` : error.message,true);
+        // A lost commit reply may mean the whole batch succeeded. Never retry automatically.
       }finally{
         busy=false;render();$('migration-source').disabled=$('migration-selection').disabled=false;
       }
