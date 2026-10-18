@@ -30,35 +30,66 @@
         <div><p class="eyebrow">STOPWATCH → ВАШ ЛИЧНЫЙ АУТЕНТИФИКАТОР</p><h1>Начните<br><em>с прошивки.</em></h1><p class="intro-copy">Сначала установите StopWatch OTP через ESPHome Web.<br>Затем вернитесь сюда и добавьте аккаунты.</p></div>
         <div class="watch-art" aria-hidden="true"><div class="watch-button yellow"></div><div class="watch-button blue"></div><div class="watch-face"><div class="watch-arc"></div><div class="watch-content"><span>STOPWATCH</span><strong>••• •••</strong><small>TOTP / OFFLINE</small><div class="watch-line"></div></div></div><span class="art-caption">ОТДЕЛЬНОЕ УСТРОЙСТВО. ВАШИ КЛЮЧИ.</span></div>
       </section>
-      <section class="install-panel" id="install" aria-labelledby="install-heading">
-        <div class="install-topline"><p class="eyebrow">01–02 / ПЕРВАЯ УСТАНОВКА</p><a class="text-button" href="#setup">Уже прошито? К настройке ↓</a></div>
-        <h2 id="install-heading">Прошейте StopWatch через HTTPS</h2>
-        <p class="install-lead">Понадобятся Chrome или Edge, USB-кабель с передачей данных и готовый файл ниже. Устанавливать Python для прошивки через браузер не нужно.</p>
-        <div class="install-steps">
-          <article class="install-step"><span class="card-number">01 / СКАЧАЙТЕ ФАЙЛ</span><h3>Готовая прошивка OTP</h3><p>Сохраните единый образ StopWatch OTP для первой установки на ваше устройство.</p><a class="primary" href="/download/stopwatch-otp.factory.bin" download>Скачать прошивку <span>↓</span></a><small>stopwatch-otp.factory.bin · ESP32-S3</small></article>
-          <article class="install-step"><span class="card-number">02 / УСТАНОВИТЕ ПО USB</span><h3>Откройте ESPHome Web</h3><p>Подключите StopWatch. На открывшемся сайте нажмите <strong>Connect → Install</strong> и выберите скачанный файл.</p><a class="primary" href="https://web.esphome.io/" target="_blank" rel="noopener noreferrer">Прошить в ESPHome Web <span>↗</span></a><small>Откроется официальный сайт по HTTPS</small></article>
+      <section class="install-section" id="install" aria-labelledby="install-heading">
+        <div class="section-heading">
+          <div><p class="eyebrow">ПЕРВАЯ УСТАНОВКА</p><h2 id="install-heading">Три шага до первого аккаунта</h2></div>
+          <a class="secondary" href="#setup">Уже прошито? К настройке <span aria-hidden="true">↓</span></a>
         </div>
-        <p class="install-note">Выбирайте свой файл в Install. Кнопка Prepare for first use устанавливает другую прошивку. Если браузер открыт на Mac, передайте USB-устройство macOS, а не Windows в Parallels.</p>
-        <p class="install-note">Этот образ — для первой установки. Для обновления с сохранением аккаунтов используйте инструкцию из <a href="/download/StopWatch-OTP-0.1.0.zip" download>полного комплекта</a>.</p>
+        <p class="section-description">Понадобятся Chrome или Edge и USB-кабель с передачей данных.</p>
+        <div class="steps-grid">
+          <article class="step-card">
+            <div class="step-topline"><span class="step-number">01</span><span class="card-number">СКАЧАЙТЕ ФАЙЛ</span></div>
+            <h3>Скачайте прошивку</h3>
+            <p>Сохраните готовый образ StopWatch OTP для первой установки на ваше устройство.</p>
+            <div class="step-actions"><a class="primary" href="/download/stopwatch-otp.factory.bin" download>Скачать прошивку <span aria-hidden="true">↓</span></a><small>stopwatch-otp.factory.bin · ESP32-S3</small></div>
+          </article>
+          <article class="step-card">
+            <div class="step-topline"><span class="step-number">02</span><span class="card-number">УСТАНОВИТЕ ПО USB</span></div>
+            <h3>Прошейте StopWatch</h3>
+            <p>Подключите устройство. В ESPHome Web нажмите <strong>Connect → Install</strong> и выберите скачанный файл.</p>
+            <div class="step-actions"><a class="primary" href="https://web.esphome.io/" target="_blank" rel="noopener noreferrer">Открыть ESPHome Web <span aria-hidden="true">↗</span></a><small>Откроется в новой вкладке</small></div>
+          </article>
+          <article class="step-card">
+            <div class="step-topline"><span class="step-number">03</span><span class="card-number">НАСТРОЙТЕ УСТРОЙСТВО</span></div>
+            <h3>Создайте графический ключ</h3>
+            <p>Перезапустите StopWatch и задайте ключ из 4–6 точек на его экране. Закройте соединение в ESPHome Web и вернитесь сюда.</p>
+            <div class="step-actions"><a class="primary" href="#setup">Перейти к настройке <span aria-hidden="true">↓</span></a><small>Дальше — подключение и аккаунты</small></div>
+          </article>
+        </div>
+        <aside class="install-notes" aria-label="Перед установкой">
+          <span class="note-label">НА ЗАМЕТКУ</span>
+          <div><p>В Install выбирайте скачанный файл. Prepare for first use устанавливает другую прошивку. Если браузер открыт на Mac, передайте USB-устройство macOS, а не Windows в Parallels.</p><p>Этот образ — для первой установки. Для обновления с сохранением аккаунтов используйте инструкцию из <a class="inline-link" href="#download-kit">полного комплекта</a>.</p></div>
+        </aside>
       </section>
-      <div class="setup-intro" id="setup"><p class="eyebrow">03 / ПОСЛЕ ПРОШИВКИ</p><h2>Вернитесь и настройте аккаунты</h2><p>Перезапустите StopWatch, создайте графический ключ из 4–6 точек на его экране и закройте соединение с устройством в ESPHome Web.</p></div>
-      <section class="connection-card" aria-labelledby="connection-heading">
+      <section class="connection-card" id="setup" aria-labelledby="connection-heading">
         <div class="connection-icon" aria-hidden="true">↔</div><div class="connection-copy"><div class="connection-title"><h2 id="connection-heading">Подключите прошитый StopWatch</h2><span class="pill" id="connection-pill">НЕ ПОДКЛЮЧЁН</span></div><p id="connection-detail">Это подключение для настройки аккаунтов после установки прошивки.</p></div>
         <button class="primary" id="connect">Подключить для настройки <span>↗</span></button>
       </section>
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
-      <section class="accounts-section" id="accounts" aria-labelledby="accounts-heading">
+      <section class="accounts-section panel" id="accounts" aria-labelledby="accounts-heading">
         <div class="section-heading"><div><p class="eyebrow">ВАШЕ ХРАНИЛИЩЕ</p><h2 id="accounts-heading">Аккаунты <span id="account-total">/ 00</span></h2></div><div class="actions"><button class="secondary" id="sync" data-auth disabled>↻ Установить время</button><button class="primary" id="add" data-auth disabled>＋ Добавить аккаунт</button></div></div>
         <div class="migration-entry"><button class="secondary" id="google-import" data-auth disabled>Из Google Authenticator</button><span>Перенесите один аккаунт или все через QR экспорта.</span></div>
         <div class="account-toolbar"><label class="search"><span aria-hidden="true">⌕</span><input type="search" id="search" placeholder="Найти сервис или аккаунт" autocomplete="off" aria-label="Поиск аккаунта"></label><span class="capacity">ДО 100 АККАУНТОВ</span></div>
         <div id="account-list" class="account-list"><div class="empty"><div class="empty-icon">＋</div><h3>Здесь будут ваши аккаунты</h3><p>Подключите устройство и разрешите USB-доступ<br>в его настройках после разблокировки.</p><span class="empty-footnote">Секреты аккаунтов скрыты в списке</span></div></div>
       </section>
-      <section class="bottom-grid" id="backup">
-        <article class="utility-card"><span class="card-number">01 / ВОССТАНОВЛЕНИЕ</span><h3>Копия, которая<br>останется у вас.</h3><p>Сохраните зашифрованный файл под отдельной парольной фразой. Он подойдёт для другого StopWatch.</p><div class="utility-actions"><button class="text-button" id="backup-save" data-auth disabled>Создать копию <span>↓</span></button><button class="text-button muted" id="backup-restore" data-auth disabled>Восстановить <span>↗</span></button></div></article>
-        <article class="utility-card time-card"><span class="card-number">02 / ТОЧНОЕ ВРЕМЯ</span><div class="time-heading"><h3>Каждая секунда<br>имеет значение.</h3><span class="clock-icon" aria-hidden="true">◷</span></div><p id="time-description">TOTP зависит от часов. При первой настройке передайте устройству правильное время компьютера.</p><div class="time-status"><span class="dot" id="time-dot"></span><span id="time-status">Состояние часов неизвестно</span></div></article>
+      <section class="bottom-grid" id="backup" aria-label="Резервная копия и время">
+        <article class="utility-card"><span class="card-number">РЕЗЕРВНАЯ КОПИЯ</span><h3>Копия, которая останется у вас</h3><p>Сохраните зашифрованный файл под отдельной парольной фразой. Он подойдёт для другого StopWatch.</p><div class="utility-actions"><button class="secondary" id="backup-save" data-auth disabled>Создать копию <span aria-hidden="true">↓</span></button><button class="secondary" id="backup-restore" data-auth disabled>Восстановить <span aria-hidden="true">↗</span></button></div></article>
+        <article class="utility-card time-card"><span class="card-number">ТОЧНОЕ ВРЕМЯ</span><div class="time-heading"><h3>Каждая секунда имеет значение</h3><span class="clock-icon" aria-hidden="true">◷</span></div><p id="time-description">TOTP зависит от часов. При первой настройке передайте устройству правильное время компьютера.</p><div class="time-status"><span class="dot" id="time-dot"></span><span id="time-status">Состояние часов неизвестно</span></div></article>
       </section>
-      <section class="guide" id="guide"><p class="eyebrow">ТРИ ПРОСТЫХ ШАГА</p><div class="guide-grid"><div><span>01</span><h3>Подключите</h3><p>Выберите USB-порт, разблокируйте StopWatch графическим ключом и разрешите USB в настройках.</p></div><div><span>02</span><h3>Добавьте аккаунт</h3><p>Загрузите QR-картинку из настроек 2FA сервиса или вставьте его секрет.</p></div><div><span>03</span><h3>Подтвердите</h3><p>Проверьте данные на экране устройства. Сохраните новую резервную копию.</p></div></div><h3>Комплект и настройка после прошивки</h3><p>Скачайте и распакуйте <a href="/download/StopWatch-OTP-0.1.0.zip" download>комплект с прошивкой и инструкцией</a>. Первая установка выполняется через ESPHome Web по кнопке выше. Для настройки аккаунтов по USB запустите сайт на компьютере с браузером: на Windows — start-web.cmd, на Mac — python3 tools/server.py из папки проекта. Затем откройте http://127.0.0.1:8765/ в Chrome или Edge. В комплекте также есть инструкция настройки HTTPS.</p></section>
-      <footer><span>Секреты обрабатываются в памяти этого браузера при импорте и копировании.</span><button id="lock" class="text-button" data-auth disabled>Заблокировать устройство ↗</button></footer>
+      <section class="guide" id="guide" aria-labelledby="guide-heading">
+        <div class="section-heading"><div><p class="eyebrow">ПОСЛЕ УСТАНОВКИ</p><h2 id="guide-heading">Как добавить аккаунт</h2></div></div>
+        <div class="steps-grid guide-grid">
+          <article class="step-card"><div class="step-topline"><span class="step-number">01</span><span class="card-number">ПОДКЛЮЧЕНИЕ</span></div><h3>Разрешите доступ</h3><p>Выберите USB-порт, разблокируйте StopWatch графическим ключом и разрешите USB в настройках устройства.</p></article>
+          <article class="step-card"><div class="step-topline"><span class="step-number">02</span><span class="card-number">ДОБАВЛЕНИЕ</span></div><h3>Добавьте аккаунт</h3><p>Загрузите QR-картинку из настроек 2FA сервиса или вставьте его секрет. Для переноса используйте «Из Google Authenticator».</p></article>
+          <article class="step-card"><div class="step-topline"><span class="step-number">03</span><span class="card-number">ПОДТВЕРЖДЕНИЕ</span></div><h3>Подтвердите на экране</h3><p>Проверьте данные на StopWatch и подтвердите сохранение. После добавления создайте новую резервную копию.</p></article>
+        </div>
+        <article class="download-card panel" id="download-kit">
+          <div><p class="eyebrow">ВСЁ ПОД РУКОЙ</p><h3>Полный комплект StopWatch OTP</h3><p>Прошивка, локальный сайт и инструкция в одном архиве. Распакуйте его и запустите сайт на компьютере с браузером.</p></div>
+          <a class="secondary" href="/download/StopWatch-OTP-0.1.0.zip" download>Скачать комплект <span aria-hidden="true">↓</span></a>
+          <div class="launch-options"><p><span>WINDOWS</span><code>start-web.cmd</code></p><p><span>MAC</span><code>python3 tools/server.py</code></p><p><span>АДРЕС В CHROME ИЛИ EDGE</span><a class="inline-link" href="http://127.0.0.1:8765/">127.0.0.1:8765</a></p></div>
+        </article>
+      </section>
+      <footer><span>Секреты обрабатываются в памяти этого браузера при импорте и копировании.</span><button id="lock" class="secondary" data-auth disabled>Заблокировать устройство <span aria-hidden="true">↗</span></button></footer>
     </main>
   </div>
   <dialog id="modal"><form id="modal-form" autocomplete="off"><div class="modal-top"><p class="eyebrow">STOPWATCH OTP</p><button type="button" class="close" id="modal-close" aria-label="Закрыть">×</button></div><h2 id="modal-title"></h2><div id="modal-body"></div><p class="modal-error" id="modal-error" role="alert"></p><div class="modal-actions"><button type="button" class="secondary" id="modal-cancel">Отмена</button><button type="submit" class="primary" id="modal-submit">Продолжить</button></div></form></dialog>
