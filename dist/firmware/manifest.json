@@ -7,8 +7,8 @@
   "efuseProgramming": false,
   "files": {
     "stopwatch_otp.bin": {
-      "sha256": "42fc06b3b6d7e4684fd62909c764f4756ba12666e5e4ed55380fb487fc62256a",
-      "size": 1036384
+      "sha256": "847e2d679bbac1b8afe25a8a74801446702fec481b8bf8df233aff21709dfd9d",
+      "size": 1481552
     },
     "bootloader/bootloader.bin": {
       "sha256": "14b8d5558fc91bbd543ce2e346f02d232af19daa7505d187c9def6f3b1e4394a",

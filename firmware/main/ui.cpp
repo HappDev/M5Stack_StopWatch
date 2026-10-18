@@ -65,7 +65,10 @@ void Ui::update_codes() {
     }
     if(view_==View::Code && code_label_ && selected_<vault_.count()) {
         const auto& r=vault_.record(selected_);char code[9]{},text[64];
-        if(!valid || !totp(r,now,code)) {strcpy(code,"-- -- --");strcpy(text,"Синхронизируйте время");}
+        if(show_tx_ && ble_ && ble_->result()==BleTx::Sending) {
+            memcpy(code,sending_code_,sizeof code);strcpy(text,"Отправка…");
+        }
+        else if(!valid || !totp(r,now,code)) {strcpy(code,"-- -- --");strcpy(text,"Синхронизируйте время");}
         else snprintf(text,sizeof text,"Ещё %u с",static_cast<unsigned>(r.period-now%r.period));
         lv_label_set_text(code_label_,code);lv_label_set_text(seconds_label_,text);wipe(code,sizeof code);
     }
@@ -100,6 +103,7 @@ bool Ui::touch() {
     return !expired && !was_dark;
 }
 void Ui::dim() {
+    if(ble_) {ble_->cancel();ble_->cancel_pairing();}
     if (!vault_.ready()) { lock(true); return; }
     cancel(); usb_=false;
     if (on_lock_) on_lock_();
@@ -120,6 +124,8 @@ void Ui::cancel() {
 }
 void Ui::lock(bool dark) {
     if(busy_) return;
+    if(ble_) {ble_->cancel();ble_->cancel_pairing();}
+    wipe(sending_code_,sizeof sending_code_);show_tx_=false;send_feedback_.clear();
     cancel(); usb_ = false;
     if(on_lock_) on_lock_();
     if(!text_.empty()) wipe(text_.data(),text_.size());
@@ -131,11 +137,12 @@ void Ui::lock(bool dark) {
 }
 bool Ui::ask(const std::string& text, std::function<void(bool)> action) {
     if (pending_ || busy_) return false;
+    if(ble_) {ble_->cancel();ble_->cancel_pairing();}
     text_ = text; pending_ = std::move(action); answer_ = -1; view_ = View::Confirm; render(); return true;
 }
 void Ui::refresh() {
     if (!vault_.ready()) { lock(); return; }
-    if (view_ == View::List || view_ == View::Code || view_ == View::Settings) render();
+    if (view_ == View::List || view_ == View::Code || view_ == View::Settings || view_==View::Bluetooth) render();
 }
 void Ui::pin_key(int key) {
     if (busy_ || vault_.wait_seconds()) return;
@@ -220,25 +227,74 @@ void Ui::submit_pattern() {
     if (ok && vault_.ready()) { view_=View::List; render(); }
     else { lock(); if (info_label_) lv_label_set_text(info_label_,vault_.error()); }
 }
-void Ui::select(size_t index) { selected_ = index; view_ = View::Code; render(); }
+void Ui::select(size_t index, bool send) {
+    if(index>=vault_.count() || !vault_.ready() || dark_ || session_expired()) return;
+    if(ble_) {ble_->cancel();ble_->cancel_pairing();}
+    wipe(sending_code_,sizeof sending_code_);show_tx_=false;send_feedback_.clear();
+    selected_ = index; view_ = View::Code; render();
+    if(send) send_code();
+}
+void Ui::send_code() {
+    if(!ble_ || !vault_.ready() || dark_ || busy_ || session_expired() || view_!=View::Code || selected_>=vault_.count()) return;
+    if(ble_->result()==BleTx::Sending) return;
+    show_tx_=true;send_feedback_.clear();
+    char code[9]{};
+    if(!board::rtc_valid()) {
+        show_tx_=false; // The existing countdown label explains the RTC error.
+    } else if(!totp(vault_.record(selected_),board::now(),code)) {
+        send_feedback_="Код недоступен";
+    } else {
+        if(ble_->send(code,esp_timer_get_time())) {
+            memcpy(sending_code_,code,sizeof code);
+            if(code_label_) lv_label_set_text(code_label_,code);
+        }
+    }
+    wipe(code,sizeof code);update_bluetooth();
+}
+void Ui::bluetooth_action(int action) {
+    if(!ble_ || !vault_.ready() || dark_ || session_expired()) return;
+    if(action==0) ble_->enable(!ble_->enabled());
+    if(action==1 && ble_->pair(esp_timer_get_time())) view_=View::Pairing;
+    if(action==2) {
+        ask("Забыть компьютер?\nДля ввода потребуется\nновое сопряжение.",[this](bool yes){
+            if(yes) ble_->forget();
+            view_=View::Bluetooth;
+        });
+        return;
+    }
+    render();
+}
+void Ui::update_bluetooth() {
+    if(!ble_ || !bluetooth_label_) return;
+    const char* text=ble_->status();
+    if(view_==View::Code && show_tx_) text=send_feedback_.empty()?ble_->tx_status():send_feedback_.c_str();
+    lv_label_set_text(bluetooth_label_,text);
+}
 void Ui::settings_action(int action) {
     if (action == 0 && vault_.ready()) { usb_ = !usb_; render(); }
     if (action == 1 && vault_.ready()) {
+        if(ble_) {ble_->cancel();ble_->cancel_pairing();}
         usb_=false; if (on_lock_) on_lock_();
         wipe(first_,sizeof first_); gesture_.clear(); pattern_submit_=false;
         pattern_change_=true; pattern_second_=false; view_=View::Pattern; render();
     }
-    if (action == 2) ask("Удалить ВСЕ аккаунты?\nНужна резервная копия.\nОтменить сброс нельзя.", [this](bool yes) {
-        if (yes) { vault_.reset(); lock(); }
+    if (action == 2) ask(ble_ ? "Удалить ВСЕ аккаунты\nи сопряжение Bluetooth?\nНужна резервная копия.\nОтменить сброс нельзя." :
+        "Удалить ВСЕ аккаунты?\nНужна резервная копия.\nОтменить сброс нельзя.", [this](bool yes) {
+        if (yes) {
+            if(ble_ && !ble_->reset()) {message("Не удалось удалить\nсопряжение Bluetooth.\nПовторите сброс.");return;}
+            vault_.reset();lock();
+        }
         else if (vault_.ready()) { view_ = View::Settings; render(); }
         else { recovery(); }
     });
 }
 void Ui::render() {
-    if ((view_==View::List || view_==View::Code || view_==View::Settings) && !vault_.ready()) view_=auth_view();
+    if ((view_==View::List || view_==View::Code || view_==View::Settings || view_==View::Bluetooth || view_==View::Pairing) && !vault_.ready()) view_=auth_view();
     retry_visible_=false;
     pattern_panel_=pattern_line_=nullptr; std::fill(std::begin(pattern_dots_),std::end(pattern_dots_),nullptr);
     pin_label_ = code_label_ = seconds_label_ = info_label_ = clock_label_ = nullptr;
+    bluetooth_label_=nullptr;
+    if(ble_) { rendered_comparison_=ble_->comparison();rendered_number_=ble_->number();rendered_bonded_=ble_->bonded();rendered_tx_=ble_->result(); }
     list_codes_.fill(nullptr);list_steps_.fill(-1);last_second_=UINT32_MAX;
     auto screen = lv_screen_active(); lv_obj_clean(screen);
     rendered_time_valid_=board::rtc_valid(); rendered_usb_=usb_;
@@ -297,7 +353,7 @@ void Ui::render() {
         lv_obj_set_style_pad_all(panel,0,0); lv_obj_set_scroll_dir(panel,LV_DIR_VER);
         for (size_t i = 0; i < vault_.count(); ++i) {
             const auto& r = vault_.record(i);
-            auto b = button("",0,static_cast<int>(i*72),314,64,[this,i]{select(i);});
+            auto b = button("",0,static_cast<int>(i*72),314,64,[this,i]{select(i,true);});
             lv_obj_set_parent(b,panel);
             lv_obj_set_style_pad_all(b,0,0);
             auto* name=lv_obj_get_child(b,0);lv_obj_set_align(name,LV_ALIGN_TOP_LEFT);lv_obj_set_pos(name,8,8);lv_obj_set_size(name,144,24);
@@ -321,18 +377,47 @@ void Ui::render() {
         auto issuer=label(r.issuer,70,85,326);lv_obj_set_height(issuer,28);lv_label_set_long_mode(issuer,LV_LABEL_LONG_DOT);
         auto account=label(r.account,60,115,346);lv_obj_set_height(account,48);lv_label_set_long_mode(account,LV_LABEL_LONG_DOT);
         code_label_ = label("",45,185,376,&lv_font_montserrat_48);
+        if(ble_) {
+            lv_obj_add_flag(code_label_,LV_OBJ_FLAG_CLICKABLE);
+            auto* callback=new std::function<void()>([this]{if(touch())send_code();});
+            lv_obj_add_event_cb(code_label_,click,LV_EVENT_CLICKED,callback);
+            lv_obj_add_event_cb(code_label_,deleted,LV_EVENT_DELETE,callback);
+            bluetooth_label_=label("",60,rendered_time_valid_?305:277,346);
+        }
         seconds_label_ = label("",75,265,316);
+        if(ble_ && !rendered_time_valid_) lv_obj_set_y(seconds_label_,245);
         if (!rendered_time_valid_) button(usb_ ? "Закрыть USB" : "Разрешить USB",98,310,270,44,[this]{settings_action(0);});
-        button("Аккаунты",143,rendered_time_valid_?350:366,180,50,[this]{view_=View::List;render();});
+        button("Аккаунты",143,rendered_time_valid_?350:366,180,50,[this]{if(ble_)ble_->cancel();view_=View::List;render();});
         last_second_ = UINT32_MAX;
     } else if (view_ == View::Settings) {
         label("Настройки",90,65,286);
-        button(usb_ ? "Закрыть USB" : "Разрешить USB",98,115,270,48,[this]{settings_action(0);});
-        button("Сменить ключ",98,178,270,48,[this]{settings_action(1);});
-        button("Сбросить всё",98,241,270,48,[this]{settings_action(2);});
+        button(usb_ ? "Закрыть USB" : "Разрешить USB",98,105,270,46,[this]{settings_action(0);});
+        button("Сменить ключ",98,159,270,46,[this]{settings_action(1);});
+        button("Сбросить всё",98,213,270,46,[this]{settings_action(2);});
+        if(ble_) button("Bluetooth",98,267,270,46,[this]{view_=View::Bluetooth;render();});
         char zone[20];format_zone(display_offset_minutes(),zone,sizeof zone);
-        label(board::rtc_valid() ? zone : "Синхронизируйте время",75,308,316);
+        label(board::rtc_valid() ? zone : "Синхронизируйте время",75,326,316);
         button("Назад",153,365,160,45,[this]{view_=View::List;render();});
+    } else if(view_==View::Bluetooth && ble_) {
+        label("Bluetooth",90,65,286);
+        bluetooth_label_=label("",65,105,336);
+        button(ble_->enabled()?"Выключить":"Включить",98,153,270,46,[this]{bluetooth_action(0);});
+        if(ble_->enabled() && !ble_->bonded()) button("Сопряжение",98,211,270,46,[this]{bluetooth_action(1);});
+        if(ble_->bonded()) button("Забыть компьютер",98,269,270,46,[this]{bluetooth_action(2);});
+        button("Назад",153,365,160,45,[this]{view_=View::Settings;render();});
+    } else if(view_==View::Pairing && ble_) {
+        label("Сопряжение",85,65,296);
+        bluetooth_label_=label("",65,108,336);
+        if(ble_->comparison()) {
+            char number[7];snprintf(number,sizeof number,"%06u",static_cast<unsigned>(ble_->number()));
+            label(number,60,172,346,&lv_font_montserrat_48);
+            label("Число совпадает\nс числом на компьютере?",65,235,336);
+            button("Совпадает",100,300,266,46,[this]{
+                ble_->tick(esp_timer_get_time(),vault_.ready()&&!dark_&&!session_expired());
+                ble_->confirm(true);render();
+            });
+        } else label("Выберите StopWatch OTP\nв настройках Bluetooth ПК.\nОжидание до 60 секунд.",65,170,336);
+        button("Отмена",153,365,160,45,[this]{ble_->confirm(false);ble_->cancel_pairing();view_=View::Bluetooth;render();});
     } else if (view_ == View::Confirm) {
         label("Подтверждение",75,70,316);
         auto panel=lv_obj_create(screen);lv_obj_set_pos(panel,65,120);lv_obj_set_size(panel,336,190);
@@ -344,10 +429,21 @@ void Ui::render() {
         label(text_.c_str(),70,140,326); button("Назад",153,330,160,50,[this]{view_=vault_.ready()?View::List:auth_view();render();});
     }
     update_codes();
+    update_bluetooth();
 }
 void Ui::tick() {
     if(busy_) return;
     if (session_expired()) lock(dark_);
+    if(ble_) {
+        if(!board::rtc_valid()) ble_->cancel();
+        ble_->tick(esp_timer_get_time(),vault_.ready()&&!dark_);
+        if(ble_->result()!=BleTx::Sending) wipe(sending_code_,sizeof sending_code_);
+        if(rendered_tx_!=ble_->result()) {rendered_tx_=ble_->result();if(view_==View::Code)update_codes();}
+        if(view_==View::Pairing && !ble_->pairing()) {view_=View::Bluetooth;last_activity_=millis();render();}
+        else if(view_==View::Pairing && (rendered_comparison_!=ble_->comparison() || rendered_number_!=ble_->number())) render();
+        else if(view_==View::Bluetooth && rendered_bonded_!=ble_->bonded()) render();
+        update_bluetooth();
+    }
     if(board::wake_touch()) touch();
     bool a = board::button_a(), b = board::button_b(), held = board::button_b_held();
     if (a || b || held) {
@@ -363,7 +459,7 @@ void Ui::tick() {
                 if (view_==View::Pattern) { if (b) cancel_pattern(); }
                 else {
                     if (a && vault_.count()) select((selected_ + 1) % vault_.count());
-                    if (b) { view_ = View::List; render(); }
+                    if (b) { if(ble_){ble_->cancel();ble_->cancel_pairing();} view_ = View::List; render(); }
                 }
             }
         }
@@ -377,7 +473,7 @@ void Ui::tick() {
         view_ = vault_.ready() ? View::List : auth_view();
         action(yes); render();
     }
-    if (millis() - last_activity_ >= 30000 && !dark_) dim();
+    if (millis() - last_activity_ >= 30000 && !dark_ && !(ble_&&ble_->pairing())) dim();
     if (pattern_submit_) submit_pattern();
     if (pin_submit_) submit_pin();
     if (!dark_ && (view_==View::List || view_==View::Code || view_==View::Settings) &&
@@ -396,7 +492,7 @@ void Ui::tick() {
             }
         }
     }
-    if (dark_ && !board::usb_power()) {
+    if (dark_ && !board::usb_power() && !(ble_&&ble_->active())) {
         board::sleep();
         // A touch IRQ or a side button wakes the display; timer wake keeps it dark.
         if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) touch();

@@ -6,10 +6,12 @@
 #include <cstdlib>
 
 static bool side_a=false,side_b=false,side_held=false,wake=false,lit=true;
+static bool plugged=true;
+static unsigned sleep_calls=0;
 namespace board {
-bool usb_power(){return true;}
+bool usb_power(){return plugged;}
 void screen(bool on){lit=on;}
-void sleep(){}
+void sleep(){++sleep_calls;}
 bool button_a(){bool v=side_a;side_a=false;return v;}
 bool button_b(){bool v=side_b;side_b=false;return v;}
 bool button_b_held(){bool v=side_held;side_held=false;return v;}
@@ -237,4 +239,66 @@ static void ui_account_codes() {
     while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
     puts("PASS: 100 account rows, 6/8 digits, period rollover without scroll reset, local clock, invalid RTC, wake and round controls");
 }
-int main(){setvbuf(stdout,nullptr,_IONBF,0);setup_lvgl();ui_enrollment();ui_migration();ui_session();ui_recovery_and_usb();ui_batch_import();ui_spinner();ui_account_codes();puts("ALL LVGL UI TESTS PASSED");}
+static void ui_bluetooth() {
+    fresh();FakeBlePort port;port.saved=true;port.connect();otp::BleKeyboard keyboard(port);assert(keyboard.begin());
+    otp::Vault v;assert(v.begin());bool usb=false;otp::Ui ui(v,usb,&keyboard);ui.begin();
+    draw(ui,"1236");draw(ui,"1236");
+    for(int i=0;i<10;++i) {auto r=record(i);snprintf(r.issuer,sizeof r.issuer,"BLE Service %d",i);assert(v.upsert(r));}
+    ui.refresh();port.reports.clear();
+    char code[9];assert(otp::totp(v.record(0),board_epoch,code));
+    auto tap_label=[&](const char* text){
+        auto* object=find_text(text);assert(object);lv_obj_update_layout(lv_screen_active());
+        lv_area_t area;lv_obj_get_coords(object,&area);
+        sample(ui,(area.x1+area.x2)/2,(area.y1+area.y2)/2,true);
+        sample(ui,(area.x1+area.x2)/2,(area.y1+area.y2)/2,false);
+    };
+    auto finish=[&]{for(int i=0;i<20;++i){advance(20);ui.tick();}};
+    tap_label("BLE Service 0");assert(keyboard.result()==otp::BleTx::Sending);screenshot("bluetooth-code-sending");
+    tap_label(code);finish();assert(port.typed()==code);assert(find_text("Код отправлен"));
+    screenshot("bluetooth-code-sent");
+    size_t count=port.typed().size();ui.refresh();advance(1000);ui.tick();assert(port.typed().size()==count);
+    tap_label(code);finish();assert(port.typed()==std::string(code)+code);
+    port.reports.clear();side_a=true;ui.tick();finish();assert(port.typed().empty()&&find_text("BLE Service 1"));
+    assert(otp::totp(v.record(1),board_epoch,code));
+    // The current code is recomputed at the physical action, even across a TOTP boundary.
+    board_epoch+=30;assert(otp::totp(v.record(1),board_epoch,code));
+    sample(ui,233,210,true);sample(ui,233,210,false);finish();assert(port.typed()==code);
+    port.reports.clear();plugged=false;sleep_calls=0;advance(30000);ui.tick();
+    assert(!lit&&keyboard.active()&&port.running&&sleep_calls==0);
+    wake=true;ui.tick();finish();assert(lit&&port.typed().empty());
+    // An explicit click with no connection is never replayed after reconnecting.
+    port.disconnect();ui.tick();tap_label(code);assert(find_text("Bluetooth не подключён"));
+    port.connect();finish();assert(port.typed().empty());
+    tap_label(code);ui.lock();finish();assert(keyboard.result()!=otp::BleTx::Sending&&!v.ready());
+    draw(ui,"1236");port.reports.clear();
+    // A scroll gesture must not count as opening a card.
+    sample(ui,230,285,true);sample(ui,230,145,true);sample(ui,230,120,false);
+    finish();assert(port.typed().empty()&&find_text("Аккаунты"));
+    click_text(ui,"Настройки");click_text(ui,"Bluetooth");screenshot("bluetooth-settings-paired");
+    click_text(ui,"Забыть компьютер");click_text(ui,"Отмена");assert(keyboard.bonded());
+    click_text(ui,"Забыть компьютер");click_text(ui,"Разрешить");assert(!keyboard.bonded());
+    click_text(ui,"Сопряжение");assert(port.pair_open);screenshot("bluetooth-pairing");
+    advance(31000);ui.tick();assert(lit&&keyboard.pairing());
+    port.state.connected=true;port.state.comparison=true;port.state.number=123;
+    ui.tick();assert(find_text("000123")&&!port.approved);screenshot("bluetooth-number-confirmation");
+    click_text(ui,"Совпадает");assert(port.approved);
+    port.connect();ui.tick();assert(!keyboard.pairing()&&find_text("Забыть компьютер"));
+    click_text(ui,"Забыть компьютер");click_text(ui,"Разрешить");click_text(ui,"Сопряжение");
+    advance(60000);ui.tick();assert(!keyboard.pairing()&&!port.pair_open&&find_text("Bluetooth"));
+    click_text(ui,"Сопряжение");side_b=true;ui.tick();assert(!keyboard.pairing()&&find_text("Аккаунты"));
+    click_text(ui,"Настройки");click_text(ui,"Bluetooth");click_text(ui,"Выключить");
+    assert(!keyboard.active()&&!port.running&&!port.saved);screenshot("bluetooth-settings-off");
+    advance(30000);ui.tick();assert(!lit&&sleep_calls>0);wake=true;ui.tick();plugged=true;
+    click_text(ui,"Назад");click_text(ui,"Назад");
+    rtc_ok=false;ui.tick();tap_label("BLE Service 0");assert(find_text("Синхронизируйте время")&&port.typed().empty());
+    screenshot("bluetooth-time-invalid");
+    rtc_ok=true;ui.tick();side_b=true;ui.tick();
+    click_text(ui,"Настройки");click_text(ui,"Bluetooth");click_text(ui,"Включить");port.connect();ui.tick();
+    click_text(ui,"Назад");click_text(ui,"Сбросить всё");port.fail=true;click_text(ui,"Разрешить");
+    assert(v.ready()&&v.count()==10&&find_text("Не удалось удалить\nсопряжение Bluetooth.\nПовторите сброс."));
+    port.fail=false;click_text(ui,"Назад");click_text(ui,"Настройки");click_text(ui,"Сбросить всё");click_text(ui,"Разрешить");
+    assert(v.status()==otp::VaultStatus::Empty&&!keyboard.enabled()&&!keyboard.bonded()&&!port.saved);
+    ui.lock();while(lv_obj_get_event_count(lv_screen_active()))lv_obj_remove_event(lv_screen_active(),0);
+    puts("PASS: LVGL BLE list-open/repeat, yellow navigation, rollover, scroll, wake, offline, lock, pairing confirmation/timeout, forget and off");
+}
+int main(){setvbuf(stdout,nullptr,_IONBF,0);radio_entropy_test();setup_lvgl();ui_enrollment();ui_migration();ui_session();ui_recovery_and_usb();ui_batch_import();ui_spinner();ui_account_codes();ui_bluetooth();puts("ALL LVGL UI TESTS PASSED");}

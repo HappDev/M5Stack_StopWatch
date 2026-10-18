@@ -24,6 +24,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='stopwatch-native-', ignore_cleanup_errors=True) as build:
         out = Path(build) / ('tests.exe' if os.name == 'nt' else 'tests')
         flags = ['-O2', '-Wno-deprecated-declarations', '-I'+str(ROOT / 'tests/native'),
+                 '-I'+str(Path(args.idf) / 'components/esp_hid/include'),
                  '-I'+str(ROOT / 'firmware/main'), '-I'+str(mbed / 'include'),
                  '-I'+str(Path(args.idf) / 'components/json/cJSON'),
                  '-DMBEDTLS_CONFIG_FILE="host_config.h"']
@@ -35,6 +36,9 @@ def main():
             objects.append(str(obj))
         obj = Path(build) / 'cJSON.o'
         subprocess.run([args.zig, 'cc', *flags, '-c', str(Path(args.idf) / 'components/json/cJSON/cJSON.c'), '-o', str(obj)], check=True)
+        objects.append(str(obj))
+        obj = Path(build) / 'esp_hid_common.o'
+        subprocess.run([args.zig, 'cc', *flags, '-c', str(Path(args.idf) / 'components/esp_hid/src/esp_hid_common.c'), '-o', str(obj)], check=True)
         objects.append(str(obj))
         ui_objects = []
         if args.ui:
@@ -61,6 +65,7 @@ def main():
             subprocess.run([args.zig, 'ar', 'rcs', str(library), '@'+str(response)], check=True)
             ui_objects = [str(ROOT / 'firmware/main/ui.cpp'), str(library)]
         cmd = [args.zig, 'c++', *flags, '-UNDEBUG', '-std=c++17', str(ROOT / 'firmware/main/crypto.cpp'),
+               str(ROOT / 'firmware/main/ble_keyboard.cpp'),
                str(ROOT / 'firmware/main/pattern.cpp'),
                str(ROOT / 'firmware/main/clock.cpp'),
                str(ROOT / 'firmware/main/vault.cpp'), str(ROOT / 'firmware/main/protocol.cpp'),

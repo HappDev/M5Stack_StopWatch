@@ -7,11 +7,12 @@
 
 static otp::Vault vault;
 static bool usb_authorized = false;
-static otp::Ui ui(vault, usb_authorized);
+static otp::Ui ui(vault, usb_authorized, &otp::bluetooth());
 static otp::Protocol protocol(vault, ui, usb_authorized);
 extern "C" void app_main() {
     vault.begin();
     otp::clock_begin();
+    otp::bluetooth().begin();
     if(!board::begin()) { while(true) vTaskDelay(pdMS_TO_TICKS(1000)); }
     ui.begin();
     const bool usb_ok=protocol.begin();

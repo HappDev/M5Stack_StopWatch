@@ -1,6 +1,7 @@
 #pragma once
 #include "vault.h"
 #include "pattern.h"
+#include "ble_keyboard.h"
 #include <functional>
 #include <utility>
 #include <string>
@@ -8,7 +9,7 @@
 namespace otp {
 class Ui {
 public:
-    Ui(Vault& vault, bool& usb) : vault_(vault), usb_(usb) {}
+    Ui(Vault& vault, bool& usb, BleKeyboard* ble = nullptr) : vault_(vault), usb_(usb), ble_(ble) {}
     void begin();
     void tick();
     void refresh();
@@ -18,7 +19,7 @@ public:
     void message(const char* text);
     void set_lock_hook(std::function<void()> hook) { on_lock_=std::move(hook); }
 private:
-    enum class View { Pin, Pattern, Recovery, List, Code, Settings, Confirm, Error };
+    enum class View { Pin, Pattern, Recovery, List, Code, Settings, Bluetooth, Pairing, Confirm, Error };
     void render();
     View auth_view() const;
     void pin_key(int key);
@@ -32,7 +33,10 @@ private:
     void draw_pattern();
     static void pattern_event(lv_event_t* event);
     void settings_action(int action);
-    void select(size_t index);
+    void select(size_t index, bool send = false);
+    void send_code();
+    void bluetooth_action(int action);
+    void update_bluetooth();
     bool touch();
     bool session_expired() const;
     void dim();
@@ -43,6 +47,13 @@ private:
     static void click(lv_event_t* event);
     static void deleted(lv_event_t* event);
     Vault& vault_; bool& usb_;
+    BleKeyboard* ble_ = nullptr;
+    lv_obj_t* bluetooth_label_ = nullptr;
+    std::string send_feedback_;
+    char sending_code_[9]{};
+    bool show_tx_ = false, rendered_comparison_ = false, rendered_bonded_ = false;
+    BleTx rendered_tx_ = BleTx::Idle;
+    uint32_t rendered_number_ = 0;
     View view_ = View::Pin;
     bool dark_ = false, pattern_change_ = false, pattern_second_ = false;
     bool busy_ = false, pattern_submit_ = false, pin_submit_ = false, saving_ = false;

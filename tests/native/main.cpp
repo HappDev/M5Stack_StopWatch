@@ -2,8 +2,10 @@
 #include "pattern.h"
 #include "clock.h"
 #include "protocol.h"
+#include "ble_fake.h"
 #include <tinyusb.h>
 #include <tusb_cdc_acm.h>
+#include <esp_bt.h>
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -34,6 +36,9 @@ static std::string usb_rx,usb_tx;
 static std::function<void(bool)> confirm_action;
 static unsigned confirmation_count=0;
 static std::string confirmation_text;
+static esp_bt_controller_status_t radio_status=ESP_BT_CONTROLLER_STATUS_IDLE;
+static unsigned sar_samples=0;
+esp_bt_controller_status_t esp_bt_controller_get_status(){return radio_status;}
 esp_err_t tinyusb_driver_install(const tinyusb_config_t*){return ESP_OK;}
 esp_err_t tusb_cdc_acm_init(const tinyusb_config_cdcacm_t*){return ESP_OK;}
 bool tud_cdc_connected(){return usb_connected;}
@@ -68,9 +73,15 @@ esp_err_t nvs_set_u32(nvs_handle_t h,const char*,uint32_t value){if(h==2)pending
 esp_err_t nvs_commit(nvs_handle_t h){if(commit_fail)return ESP_FAIL;if(h==2){stored_offset=pending_offset;offset_exists=true;}else{counter=pending_counter;counter_exists=true;}return ESP_OK;}
 int64_t esp_timer_get_time(){clock_us+=clock_read_step_us;return clock_us;}
 uint32_t esp_rom_crc32_le(uint32_t crc,const uint8_t* data,size_t n){crc=~crc;for(size_t i=0;i<n;i++){crc^=data[i];for(int b=0;b<8;b++)crc=(crc>>1)^((crc&1)?0xedb88320u:0);}return ~crc;}
-void bootloader_random_enable(){}
+void bootloader_random_enable(){assert(radio_status!=ESP_BT_CONTROLLER_STATUS_ENABLED);++sar_samples;}
 void bootloader_random_disable(){}
 void esp_fill_random(void* p,size_t n){std::random_device rng;auto* out=static_cast<uint8_t*>(p);for(size_t i=0;i<n;i++)out[i]=rng();}
+static void radio_entropy_test() {
+    uint8_t bytes[32];unsigned before=sar_samples;
+    radio_status=ESP_BT_CONTROLLER_STATUS_ENABLED;assert(otp::random_bytes(bytes,sizeof bytes));assert(sar_samples==before);
+    radio_status=ESP_BT_CONTROLLER_STATUS_IDLE;assert(otp::random_bytes(bytes,sizeof bytes));assert(sar_samples==before+1);
+    otp::wipe(bytes,sizeof bytes);puts("PASS: RF entropy with Bluetooth and SAR entropy with radio off never overlap");
+}
 static otp::Record record(int index=0){otp::Record r{};snprintf(r.id,sizeof r.id,"00000000-0000-4000-8000-%012d",index);strcpy(r.issuer,"PrivateMail");strcpy(r.account,"alice@example.com");memcpy(r.secret,"12345678901234567890",20);r.secret_len=20;return r;}
 // Independent writer for the historical v1 layout. Production firmware cannot
 // create PIN vaults; this fixture catches accidental changes to PIN migration.
@@ -407,5 +418,5 @@ static void display_clock_tests() {
     puts("PASS: persisted display timezone, midnight rollover, offset bounds, consent, old clients and unchanged UTC timestamp");
 }
 #ifndef STOPWATCH_UI_TESTS
-int main(){setvbuf(stdout,nullptr,_IONBF,0);gestures();vectors();crypto_interop();encryption();power_cuts();retries();migration();protocol_tests();batch_import_tests();batch_import_power_cuts();migration_usb();display_clock_tests();puts("ALL NATIVE TESTS PASSED");}
+int main(){setvbuf(stdout,nullptr,_IONBF,0);radio_entropy_test();ble_controller_tests();gestures();vectors();crypto_interop();encryption();power_cuts();retries();migration();protocol_tests();batch_import_tests();batch_import_power_cuts();migration_usb();display_clock_tests();puts("ALL NATIVE TESTS PASSED");}
 #endif

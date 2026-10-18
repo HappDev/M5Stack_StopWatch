@@ -7,6 +7,7 @@
 #include <mbedtls/platform_util.h>
 #include <bootloader_random.h>
 #include <esp_random.h>
+#include <esp_bt.h>
 
 namespace otp {
 void wipe(void* p, size_t n) { mbedtls_platform_zeroize(p, n); }
@@ -136,7 +137,11 @@ bool derive_key(const char* credential, const uint8_t salt[16], uint8_t key[32],
     return ret == 0;
 }
 bool random_bytes(void* out, size_t n) {
-    // Board uses no SAR ADC or RF. Entropy is enabled only while sampling.
+    // The Bluetooth controller supplies RF entropy when enabled. Enabling the
+    // bootloader SAR entropy source at that time would conflict with RF use.
+    if(esp_bt_controller_get_status()==ESP_BT_CONTROLLER_STATUS_ENABLED) {
+        esp_fill_random(out,n);return true;
+    }
     bootloader_random_enable(); esp_fill_random(out, n); bootloader_random_disable(); return true;
 }
 bool encrypt(const uint8_t key[32], const uint8_t nonce[12], const void* aad, size_t aad_len,

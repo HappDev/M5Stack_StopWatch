@@ -51,10 +51,18 @@ def main():
     shutil.copytree(ROOT / 'firmware', stage, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns('build', '.git', 'managed_components', 'sdkconfig', 'sdkconfig.old'),
                     copy_function=copy_if_changed)
+    # A cached sdkconfig otherwise overrides newly added defaults (for example
+    # enabling Bluetooth). This cache is generated entirely from this project.
+    defaults_hash = hashlib.sha256((stage / 'sdkconfig.defaults').read_bytes()).hexdigest()
+    defaults_stamp = cache / 'defaults.sha256'
+    if not defaults_stamp.exists() or defaults_stamp.read_text() != defaults_hash:
+        (stage / 'sdkconfig').unlink(missing_ok=True)
+        (stage / 'sdkconfig.old').unlink(missing_ok=True)
     print(f'Build source: {stage}', flush=True)
     command = [sys.executable, str(Path(idf) / 'tools' / 'idf.py'), '-C', str(stage)]
     subprocess.run(command + ['reconfigure' if args.configure_only else 'build'], check=True)
     verify_configuration(stage / 'sdkconfig')
+    defaults_stamp.write_text(defaults_hash)
     lock = stage / 'dependencies.lock'
     if lock.exists():
         shutil.copy2(lock, ROOT / 'firmware' / 'dependencies.lock')
